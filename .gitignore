@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+data/
+secrets/
+*.db
+*.db-*
+*.tar
+*.log
+wheelhouse/
+
+.local/
+.env
+.env.*
+!.env.example
+*.pem
+*.key

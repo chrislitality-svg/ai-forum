@@ -1,0 +1,15 @@
+.venv
+__pycache__
+data
+secrets
+.git
+*.db
+*.db-*
+*.tar
+wheelhouse
+
+.local
+.env
+.env.*
+*.pem
+*.key
