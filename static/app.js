@@ -37,6 +37,9 @@
       replies: [],
       replyAfter: 0,
       replyHasMore: false,
+      replyIds: new Set(),
+      replyRequest: null,   // 在途的回复请求（同一帖子同时只允许一个）
+      refreshRequest: null, // 在途的“刷新此帖”
     };
   }
 
@@ -346,7 +349,7 @@
       const data = await api(`/posts?after_id=${after}&limit=${PAGE}`);
       if (mine !== session) return;
       if (reset) view.posts = [];
-      view.posts.push(...(data.items || []));
+      addPosts(data.items || []);
       view.after = data.next_after_id;
       view.hasMore = !!data.has_more;
     } catch (error) {
@@ -361,6 +364,11 @@
     }
   }
 
+  function addPosts(items) {
+    const seen = new Set(view.posts.map((p) => p.id));
+    view.posts.push(...items.filter((p) => !seen.has(p.id)));
+  }
+
   // 自动刷新只追加新帖子摘要，不重复下载已加载的内容
   async function pollNewPosts() {
     if (!view || view.loadingList || view.hasMore) return;
@@ -370,7 +378,7 @@
       const data = await api(`/posts?after_id=${view.after}&limit=${PAGE}`);
       if (mine !== session) return;
       if ((data.items || []).length) {
-        view.posts.push(...data.items);
+        addPosts(data.items);
         view.after = data.next_after_id;
         view.hasMore = !!data.has_more;
         banner('ok', `有 ${data.items.length} 个新帖子`, 5000);
@@ -422,6 +430,9 @@
     view.replies = [];
     view.replyAfter = 0;
     view.replyHasMore = false;
+    view.replyIds = new Set();
+    view.replyRequest = null;   // 旧帖的在途请求靠 detailSeq 丢弃
+    view.refreshRequest = null;
     renderPosts();
     ui.app.classList.add('show-detail');
     ui.detail.replaceChildren(el('p', { class: 'loading' }, `读取帖子 #${id}`));
@@ -441,18 +452,36 @@
     }
   }
 
-  async function loadReplies(seq) {
+  // 同一帖子同一时刻只允许一个回复请求在途：并发调用（初次加载、刷新、加载更多）复用同一个 Promise，
+  // 避免拿同一个 after_id 重复请求、重复追加。
+  function loadReplies(seq) {
+    if (!view || !view.post || seq !== view.detailSeq) return Promise.resolve();
+    if (view.replyRequest) return view.replyRequest;
+    const current = view;
+    const request = fetchReplies(seq).finally(() => {
+      if (current.replyRequest === request) current.replyRequest = null;
+    });
+    view.replyRequest = request;
+    return request;
+  }
+
+  async function fetchReplies(seq) {
     const mine = session;
-    const post = view.post;
-    if (!post) return;
+    const postId = view.post.id;
     const box = ui.detail.querySelector('.reply-foot');
     if (box) box.replaceChildren(el('p', { class: 'loading' }, '读取回复'));
     try {
-      const data = await api(`/posts/${post.id}/replies?after_id=${view.replyAfter}&limit=${REPLY_PAGE}`);
-      if (mine !== session || seq !== view.detailSeq) return;
-      view.replies.push(...(data.items || []));
-      view.replyAfter = data.next_after_id;
-      view.replyHasMore = !!data.has_more;
+      const data = await api(`/posts/${postId}/replies?after_id=${view.replyAfter}&limit=${REPLY_PAGE}`);
+      if (mine !== session || seq !== view.detailSeq) return; // 已退出或已切帖：丢弃迟到响应
+      // 按 ID 去重后追加，保持 ID 升序
+      const fresh = (data.items || []).filter((r) => !view.replyIds.has(r.id));
+      for (const r of fresh) view.replyIds.add(r.id);
+      if (fresh.length) view.replies = view.replies.concat(fresh).sort((a, b) => a.id - b.id);
+      // 游标只前进不后退
+      if (data.next_after_id >= view.replyAfter) {
+        view.replyAfter = data.next_after_id;
+        view.replyHasMore = !!data.has_more;
+      }
     } catch (error) {
       if (mine !== session || seq !== view.detailSeq) return;
       handle(error, '回复');
@@ -460,13 +489,27 @@
     if (mine === session && seq === view.detailSeq) renderReplies();
   }
 
-  // 手动刷新详情：重新读取帖子状态，并只增量拉取新回复
-  async function refreshDetail() {
-    if (!view || !view.post) return;
+  // 手动刷新详情：等在途的回复请求落定，再重新读取帖子状态并只增量拉取新回复。
+  // 连续点击复用同一次刷新，避免旧的帖子快照晚到后覆盖新的。
+  function refreshDetail() {
+    if (!view || !view.post) return Promise.resolve();
+    if (view.refreshRequest) return view.refreshRequest;
+    const current = view;
+    const request = doRefreshDetail().finally(() => {
+      if (current.refreshRequest === request) current.refreshRequest = null;
+    });
+    view.refreshRequest = request;
+    return request;
+  }
+
+  async function doRefreshDetail() {
     const mine = session;
     const seq = view.detailSeq;
+    const postId = view.post.id;
     try {
-      const post = await api(`/posts/${view.post.id}`);
+      if (view.replyRequest) await view.replyRequest;
+      if (mine !== session || seq !== view.detailSeq) return;
+      const post = await api(`/posts/${postId}`);
       if (mine !== session || seq !== view.detailSeq) return;
       view.post = post;
       renderDetail();

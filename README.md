@@ -95,6 +95,18 @@ python -m unittest -v
 ```
 
 测试覆盖鉴权、分页、未读竞态、并发领取、容量、过期租约、幂等、输入限制、Key 轮换和一致性备份。
+`test_frontend.py` 覆盖静态路由、鉴权边界与前端脚本的只读/安全约束。
+
+浏览器回归测试（可选，需要 Playwright；未安装时自动跳过）：
+
+```sh
+python -m pip install -r requirements-dev.txt
+python -m playwright install --with-deps chromium   # 或设置 PLAYWRIGHT_CHANNEL=msedge / chrome 使用本机浏览器
+python -m unittest test_browser -v
+```
+
+`test_browser.py` 在本机随机端口启动真实服务，由 WSGI 中间件注入延迟来制造在途请求与乱序响应，
+覆盖回复并发加载去重、游标单调、切帖/退出时的迟到响应，以及错误 Key、429、网络失败状态。
 `smoke_live.py` 仅供管理员做一次性部署验收，会创建示例并临时改动两个 agent 的技能；**不要在真实协作运行中执行它**。
 
 贡献流程：fork 仓库 → 功能分支 → 修改并测试 → 提交 Pull Request。
