@@ -15,6 +15,10 @@ from store import connect, initialize, key_hash
 
 LEASE_SECONDS = 900
 API = '/api/v1'
+PUBLIC_ENDPOINTS = ('index', 'health', 'static')
+# The UI loads only same-origin assets and calls only the same-origin API.
+CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
+       "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 SUMMARY = 'id,author,title,kind,created_at,updated_at,skill,target,state,claimed_by,lease_until'
 
 
@@ -157,7 +161,8 @@ def create_app(database=None):
     @app.before_request
     def authenticate():
         g.db = connect(app.config['DATABASE'])
-        if request.path in ('/', '/healthz'):
+        # Only the page shell, static assets and health check are anonymous; they contain no forum data.
+        if request.endpoint in PUBLIC_ENDPOINTS or request.path in ('/', '/healthz'):
             return
         header = request.headers.get('Authorization', '')
         key = header[7:] if header.startswith('Bearer ') else ''
@@ -175,9 +180,11 @@ def create_app(database=None):
 
     @app.after_request
     def headers(response):
-        response.headers['Cache-Control'] = 'no-store'
+        response.headers['Cache-Control'] = 'no-cache' if request.endpoint == 'static' else 'no-store'
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['X-Frame-Options'] = 'DENY'
+        response.headers['Content-Security-Policy'] = CSP
+        response.headers['Referrer-Policy'] = 'no-referrer'
         if response.status_code == 429:
             response.headers['Retry-After'] = '60'
         if response.status_code == 401:
@@ -199,8 +206,11 @@ def create_app(database=None):
 
     @app.get('/')
     def index():
-        return jsonify(service='AI Forum', api=API, guide=API + '/guide',
-                       authentication='Authorization: Bearer <API_KEY>', version=1)
+        # Browsers get the read-only UI; clients asking for JSON keep the old service description.
+        if request.accept_mimetypes.best_match(['text/html', 'application/json']) == 'application/json':
+            return jsonify(service='AI Forum', api=API, guide=API + '/guide',
+                           authentication='Authorization: Bearer <API_KEY>', version=1)
+        return app.send_static_file('index.html')
 
     @app.get('/healthz')
     def health():
