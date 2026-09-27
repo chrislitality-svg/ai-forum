@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#e8e8dd">
+<title>导航 · 界面优化 mock</title>
+<!-- 界面优化 mock：数据全部虚构，不连接任何接口，不加载任何外部资源 -->
+<style>
+  :root {
+    --paper: #e8e8dd;
+    --paper-soft: #efefe7;
+    --ink: #000000;
+    --accent: #efa371;
+    --olive: #555d46;
+    --grey: #d6d6cc;
+    --online: #3f7d54;
+    --offline: #b3452e;
+    --focus: #c9662a;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --serif: "Noto Serif SC", "Songti SC", "STSong", SimSun, serif;
+    --sans: "Noto Sans SC", -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  /* 深色：只换色，不改布局。默认跟随系统，手动选择优先 */
+  :root[data-theme="dark"] {
+    --paper: #0b0b09; --paper-soft: #161612; --ink: #e8e8dd;
+    --olive: #a3a394; --grey: #3a3a33; --online: #7fbf8f; --offline: #e07a5f; --focus: #efa371;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #0b0b09; --paper-soft: #161612; --ink: #e8e8dd;
+      --olive: #a3a394; --grey: #3a3a33; --online: #7fbf8f; --offline: #e07a5f; --focus: #efa371;
+    }
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--paper); color: var(--ink);
+    font-family: var(--sans); min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+    transition: background .25s ease, color .25s ease;
+  }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  /* ---------- 报头 ---------- */
+  header { max-width: 1100px; margin: 0 auto; padding: 52px 24px 0; }
+  .kicker {
+    font-family: var(--mono); font-size: 12px; letter-spacing: 3px; text-transform: uppercase;
+    color: var(--olive); display: flex; justify-content: space-between; align-items: center; gap: 12px;
+    border-bottom: 1px solid var(--ink); padding-bottom: 10px;
+  }
+  .kicker .dot-sep { color: var(--accent); }
+  .theme-switch {
+    display: inline-flex; border: 1px solid var(--ink); border-radius: 16px; overflow: hidden;
+    font-family: var(--mono); font-size: 11px; letter-spacing: 1px;
+  }
+  .theme-switch button {
+    font: inherit; letter-spacing: inherit; color: var(--ink); background: transparent;
+    border: 0; padding: 4px 11px; cursor: pointer;
+  }
+  .theme-switch button[aria-pressed="true"] { background: var(--accent); color: #000; }
+  header h1 {
+    font-family: var(--serif); font-weight: 900;
+    font-size: clamp(36px, 8vw, 84px); line-height: 1.05; letter-spacing: 2px; padding: 26px 0 22px;
+  }
+
+  /* ---------- 系统状态条 ---------- */
+  .sysbar { border-top: 3px solid var(--ink); border-bottom: 1px solid var(--ink); display: flex; flex-wrap: wrap; }
+  .sysbar .cell {
+    font-family: var(--mono); font-size: 12px; padding: 9px 14px; border-right: 1px solid var(--ink);
+    display: flex; align-items: center; gap: 8px; flex: 1 1 auto; justify-content: center; min-width: 130px;
+  }
+  .sysbar .cell:last-child { border-right: none; }
+  .sysbar .k { color: var(--olive); letter-spacing: 1px; }
+  .sysbar .v { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .sysbar .bar { width: 44px; height: 6px; border: 1px solid var(--ink); position: relative; flex-shrink: 0; }
+  .sysbar .bar i { position: absolute; inset: 0; right: auto; background: var(--accent); display: block; }
+  .sysbar .v .short { display: none; }
+
+  .meta {
+    font-family: var(--mono); font-size: 12px; color: var(--olive);
+    display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; padding: 8px 2px;
+  }
+
+  /* ---------- 工具条：筛选 + 搜索 ---------- */
+  .toolbar {
+    max-width: 1100px; margin: 6px auto 0; padding: 0 24px;
+  }
+  .toolbar-inner {
+    display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
+    border-top: 1px solid var(--ink); border-bottom: 1px solid var(--ink); padding: 8px 0;
+  }
+  .seg { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+  .seg button {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 1px; color: var(--ink);
+    background: transparent; border: 1px solid var(--ink); border-radius: 16px; padding: 4px 12px; cursor: pointer;
+  }
+  .seg button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+  .seg .n { color: var(--olive); margin-left: 4px; }
+  .seg button[aria-pressed="true"] .n { color: var(--accent); }
+  .search { position: relative; flex: 0 1 280px; }
+  .search input {
+    width: 100%; font-family: var(--mono); font-size: 13px; color: var(--ink);
+    background: var(--paper-soft); border: 1px solid var(--ink); border-radius: 3px; padding: 6px 34px 6px 10px;
+  }
+  .search input::placeholder { color: var(--olive); }
+  .search kbd {
+    position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+    font-family: var(--mono); font-size: 11px; color: var(--olive);
+    border: 1px solid var(--grey); border-radius: 3px; padding: 0 5px;
+  }
+
+  /* ---------- 卡片 ---------- */
+  .grid {
+    max-width: 1100px; margin: 0 auto; padding: 16px 24px 72px;
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px;
+  }
+  .card {
+    background: var(--paper-soft); border: 1px solid var(--ink); border-radius: 4px; padding: 18px;
+    display: flex; flex-direction: column; text-decoration: none; color: inherit;
+    box-shadow: 3px 3px 0 var(--ink); transition: transform .12s ease, box-shadow .12s ease;
+  }
+  .card:hover, .card:focus-visible {
+    transform: translate(-2px, -2px); box-shadow: 5px 5px 0 var(--accent), 6px 6px 0 var(--ink);
+  }
+  .card:focus-visible { outline-offset: 2px; }
+  .card:hover .title, .card:focus-visible .title {
+    text-decoration: underline; text-underline-offset: 4px; text-decoration-thickness: 2px;
+  }
+  .card .no {
+    font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--olive); letter-spacing: 1px;
+    border-bottom: 1px solid var(--grey); padding-bottom: 8px;
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  }
+  .status { display: inline-flex; align-items: center; gap: 6px; }
+  .led { width: 9px; height: 9px; border-radius: 50%; border: 1px solid var(--ink); flex-shrink: 0; }
+  .status.on .led { background: var(--online); }
+  .status.off .led { background: var(--offline); }
+  .status.on .lbl { color: var(--online); }
+  .status.off .lbl { color: var(--offline); }
+  .card .main { display: flex; align-items: flex-start; gap: 12px; padding: 14px 0 10px; }
+  .card .icon {
+    font-size: 22px; width: 44px; height: 44px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    border: 1px solid var(--ink); border-radius: 50%; background: var(--paper);
+  }
+  .card .title { font-family: var(--serif); font-weight: 700; font-size: 20px; letter-spacing: 1px; line-height: 1.25; }
+  .card.is-off .title { color: var(--olive); text-decoration: line-through; text-decoration-thickness: 1px; }
+  .card .desc {
+    margin-top: 4px; font-family: var(--mono); font-size: 12px; line-height: 1.55; color: var(--olive);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .card .tags { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: auto; padding-top: 12px; }
+  .tag {
+    font-family: var(--mono); font-size: 11px; padding: 2px 9px; border: 1px solid var(--ink);
+    border-radius: 20px; background: var(--accent); color: #000;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .tag.lan { background: transparent; color: var(--olive); border-color: var(--olive); }
+  .empty {
+    grid-column: 1/-1; text-align: center; color: var(--olive);
+    padding: 60px 0; font-family: var(--mono); font-size: 13px; border: 1px dashed var(--grey); border-radius: 4px;
+  }
+
+  /* 骨架卡：去掉内容的卡片轮廓，不闪烁 */
+  .card.skeleton { box-shadow: 3px 3px 0 var(--grey); border-color: var(--grey); min-height: 168px; }
+  .skeleton .line { height: 10px; background: var(--grey); border-radius: 2px; margin-top: 12px; }
+  .skeleton .line.w60 { width: 60%; } .skeleton .line.w40 { width: 40%; } .skeleton .line.w80 { width: 80%; }
+
+  footer {
+    max-width: 1100px; margin: 0 auto; padding: 10px 24px 40px;
+    font-family: var(--mono); font-size: 11px; color: var(--olive); letter-spacing: 2px; text-transform: uppercase;
+    border-top: 3px solid var(--ink); display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  }
+
+  /* ---------- 手机 ---------- */
+  @media (max-width: 600px) {
+    header { padding-top: 28px; padding-left: 16px; padding-right: 16px; }
+    .kicker { letter-spacing: 2px; font-size: 11px; }
+    header h1 { padding: 18px 0 16px; }
+    .sysbar { display: grid; grid-template-columns: 1fr 1fr; }
+    .sysbar .cell { min-width: 0; border-right: 1px solid var(--ink); border-bottom: 1px solid var(--grey); justify-content: flex-start; }
+    .sysbar .cell:nth-child(2n) { border-right: none; }
+    .sysbar .cell:last-child:nth-child(odd) { grid-column: 1 / -1; border-right: none; }
+    .sysbar .v { white-space: nowrap; }
+    .sysbar .v .full { display: none; }
+    .sysbar .v .short { display: inline; }
+    .toolbar, .grid, footer { padding-left: 16px; padding-right: 16px; }
+    .search { flex: 1 1 100%; }
+    .search kbd { display: none; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition: none !important; }
+    .card:hover, .card:focus-visible { transform: none; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="kicker">
+    <span>Hamlet <span class="dot-sep">●</span> Service Index</span>
+    <span class="theme-switch" role="group" aria-label="配色">
+      <button type="button" data-theme-choice="light" aria-pressed="false">浅</button>
+      <button type="button" data-theme-choice="dark" aria-pressed="false">深</button>
+    </span>
+  </div>
+  <h1>导航</h1>
+  <div class="sysbar" id="sysbar" aria-label="主机状态"></div>
+  <div class="meta">
+    <span id="syncInfo"></span>
+    <span id="countInfo"></span>
+  </div>
+</header>
+
+<div class="toolbar">
+  <div class="toolbar-inner">
+    <div class="seg" role="group" aria-label="按状态筛选">
+      <button type="button" data-filter="all" aria-pressed="true">全部<span class="n" data-count="all"></span></button>
+      <button type="button" data-filter="on" aria-pressed="false">在线<span class="n" data-count="on"></span></button>
+      <button type="button" data-filter="off" aria-pressed="false">离线<span class="n" data-count="off"></span></button>
+    </div>
+    <label class="search">
+      <span class="sr-only">搜索站点</span>
+      <input id="q" type="search" placeholder="搜索名称、描述、域名" autocomplete="off">
+      <kbd aria-hidden="true">/</kbd>
+    </label>
+  </div>
+</div>
+
+<main class="grid" id="grid" aria-live="polite"></main>
+
+<footer>
+  <span>Powered by frp-panel + Hamlet</span>
+  <span>EST. 2025 · UI MOCK</span>
+</footer>
+
+<script>
+// ---------- 虚构数据（仅演示布局，不对应任何真实服务） ----------
+const SYS = { mem: 62, memText: '62% · 4.9G/7.8G', temp: 48, load: '0.42 / 0.51 / 0.47', disk: 41, diskText: '41% · 2.1T 可用', up: '12d 6h' };
+const SYNCED_AT = Date.now() - 3 * 60 * 1000;
+const SITES = [
+  { icon: '📷', title: '相册', desc: '家庭照片与视频备份，按时间线和人物浏览，支持手机自动上传', host: 'photos.example.test', lan: '192.0.2.10:2283', online: true },
+  { icon: '📝', title: '笔记', desc: '个人知识库与日记，Markdown 编辑，双向链接', host: 'notes.example.test', online: true },
+  { icon: '📚', title: '书库', desc: '电子书整理与在线阅读', host: 'books.example.test', lan: '192.0.2.10:8083', online: true },
+  { icon: '🎵', title: '音乐', desc: '本地曲库串流，歌词与专辑封面自动匹配，适合在通勤路上听', host: 'music.example.test', online: true },
+  { icon: '🗂️', title: '文件同步', desc: '多设备文件同步与分享链接', host: 'drive.example.test', lan: '192.0.2.10:8384', online: true },
+  { icon: '📈', title: '监控面板', desc: '主机与容器的资源曲线、告警记录', host: 'grafana.example.test', online: true },
+  { icon: '🧰', title: '代码仓库', desc: '自建 Git 服务，个人项目与脚本', host: 'git.example.test', online: true },
+  { icon: '⬇️', title: '下载', desc: '离线下载任务队列', lan: '192.0.2.10:6800', online: false },
+  { icon: '🪶', title: '旧博客', desc: '2019–2022 的旧文章归档，已停止更新，保留只读访问', host: 'blog.example.test', online: false },
+];
+
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// ---------- 配色：默认跟随系统，手动选择记在 localStorage ----------
+function systemDark() { return matchMedia('(prefers-color-scheme: dark)').matches; }
+function applyTheme(choice) {
+  const root = document.documentElement;
+  if (choice) root.dataset.theme = choice; else delete root.dataset.theme;
+  const dark = choice ? choice === 'dark' : systemDark();
+  document.querySelectorAll('[data-theme-choice]').forEach((b) => b.setAttribute('aria-pressed', String((b.dataset.themeChoice === 'dark') === dark)));
+  document.querySelector('meta[name="theme-color"]').content = dark ? '#0b0b09' : '#e8e8dd';
+}
+let themeChoice = null;
+try { themeChoice = localStorage.getItem('hub-theme'); } catch (_) {}
+applyTheme(themeChoice);
+document.querySelectorAll('[data-theme-choice]').forEach((b) => b.addEventListener('click', () => {
+  themeChoice = b.dataset.themeChoice;
+  try { localStorage.setItem('hub-theme', themeChoice); } catch (_) {}
+  applyTheme(themeChoice);
+}));
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (!themeChoice) applyTheme(null); });
+
+// ---------- 状态条 ----------
+function renderSys() {
+  const bar = (p) => `<span class="bar" aria-hidden="true"><i style="width:${p}%"></i></span>`;
+  // 每格一个完整值和一个短值：窄屏只显示短值，避免数值折行
+  const v = (full, short) => `<span class="v"><span class="full">${full}</span><span class="short">${short}</span></span>`;
+  $('#sysbar').innerHTML = [
+    `<div class="cell"><span class="k">MEM</span>${bar(SYS.mem)}${v(SYS.memText, SYS.mem + '%')}</div>`,
+    `<div class="cell"><span class="k">TEMP</span>${v(SYS.temp + '°C', SYS.temp + '°C')}</div>`,
+    `<div class="cell"><span class="k">LOAD</span>${v(SYS.load, SYS.load.split(' / ')[0])}</div>`,
+    `<div class="cell"><span class="k">DISK</span>${bar(SYS.disk)}${v(SYS.diskText, SYS.disk + '%')}</div>`,
+    `<div class="cell"><span class="k">UP</span>${v(SYS.up, SYS.up)}</div>`,
+  ].join('');
+}
+
+// ---------- 相对时间 ----------
+function ago(ts) {
+  const s = Math.round((Date.now() - ts) / 1000);
+  if (s < 60) return '刚刚';
+  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
+  if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
+  return `${Math.floor(s / 86400)} 天前`;
+}
+
+// ---------- 卡片 ----------
+let filter = 'all';
+function renderGrid() {
+  const q = $('#q').value.trim().toLowerCase();
+  const on = SITES.filter((s) => s.online).length;
+  document.querySelector('[data-count="all"]').textContent = SITES.length;
+  document.querySelector('[data-count="on"]').textContent = on;
+  document.querySelector('[data-count="off"]').textContent = SITES.length - on;
+  $('#countInfo').textContent = `收录 ${SITES.length} 项 · 在线 ${on}`;
+  const syncEl = $('#syncInfo');
+  syncEl.textContent = '配置同步于 ' + ago(SYNCED_AT);
+  syncEl.title = new Date(SYNCED_AT).toLocaleString('zh-CN');
+
+  const list = SITES.filter((s) => (filter === 'all' || (filter === 'on') === s.online) &&
+    (!q || [s.title, s.desc, s.host, s.lan].some((v) => v && v.toLowerCase().includes(q))));
+  const grid = $('#grid');
+  if (!list.length) {
+    grid.innerHTML = `<div class="empty">没有匹配的站点${q ? `：「${esc(q)}」` : ''}</div>`;
+    return;
+  }
+  grid.innerHTML = list.map((s, i) => `
+    <a class="card${s.online ? '' : ' is-off'}" href="#" aria-label="${esc(s.title)} · ${s.online ? '在线' : '离线'}">
+      <div class="no">
+        <span>NO.${String(SITES.indexOf(s) + 1).padStart(2, '0')}</span>
+        <span class="status ${s.online ? 'on' : 'off'}"><span class="led" aria-hidden="true"></span><span class="lbl">${s.online ? 'ONLINE' : 'OFFLINE'}</span></span>
+      </div>
+      <div class="main">
+        <div class="icon" aria-hidden="true">${esc(s.icon)}</div>
+        <div>
+          <div class="title">${esc(s.title)}</div>
+          <div class="desc">${esc(s.desc)}</div>
+        </div>
+      </div>
+      <div class="tags">
+        ${s.host ? `<span class="tag">${esc(s.host)}</span>` : ''}
+        ${s.lan ? `<span class="tag lan">内网 ${esc(s.lan)}</span>` : ''}
+      </div>
+    </a>`).join('');
+  grid.querySelectorAll('.card').forEach((a) => a.addEventListener('click', (e) => e.preventDefault()));
+}
+
+function renderSkeleton(n) {
+  $('#grid').innerHTML = Array.from({ length: n }, () =>
+    `<div class="card skeleton" aria-hidden="true"><div class="line w40"></div><div class="line w60"></div><div class="line w80"></div><div class="line w40"></div></div>`).join('');
+}
+
+document.querySelectorAll('[data-filter]').forEach((b) => b.addEventListener('click', () => {
+  filter = b.dataset.filter;
+  document.querySelectorAll('[data-filter]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+  renderGrid();
+}));
+$('#q').addEventListener('input', renderGrid);
+window.addEventListener('keydown', (e) => {
+  if (e.key === '/' && document.activeElement !== $('#q')) { e.preventDefault(); $('#q').focus(); }
+  if (e.key === 'Escape' && document.activeElement === $('#q')) { $('#q').value = ''; renderGrid(); $('#q').blur(); }
+});
+
+renderSys();
+// ?skeleton 可查看加载占位效果
+if (new URLSearchParams(location.search).has('skeleton')) renderSkeleton(6);
+else renderGrid();
+</script>
+</body>
+</html>
