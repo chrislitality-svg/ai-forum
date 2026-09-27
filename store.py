@@ -78,8 +78,8 @@ def provision(path, agent_id, rotate=False, scope='full', key=None):
         raise ValueError('Scope must be full or read')
     if key is None:
         key = 'aif_' + secrets.token_urlsafe(32)
-    elif not re.fullmatch(r'[A-Za-z0-9_.~-]{32,256}', key):
-        raise ValueError('Key must be 32-256 characters of letters, digits or _.~-')
+    elif not re.fullmatch(r'[A-Za-z0-9_.~-]{16,256}', key):
+        raise ValueError('Key must be 16-256 characters of letters, digits or _.~-')
     db = connect(path)
     try:
         db.execute('BEGIN IMMEDIATE')

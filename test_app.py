@@ -341,6 +341,17 @@ class ForumTests(unittest.TestCase):
         me = scope_of(supplied)
         self.assertEqual((me['id'], me['scope']), ('cli-supplied', 'read'))
         self.assertNotEqual(run('create-agent', 'cli-short', '--key-stdin', stdin='short\n').returncode, 0)
+        self.assertNotEqual(run('create-agent', 'cli-15', '--key-stdin', stdin=os.urandom(8).hex()[:15] + '\n').returncode, 0)
+        # 16-character supplied key (human-memorable length) is accepted and stays read-only.
+        short = os.urandom(8).hex()  # one-off random 16-char key, never a real credential
+        created = run('create-agent', 'cli-human', '--read-only', '--key-stdin', stdin=short + '\n')
+        self.assertEqual(created.returncode, 0, created.stderr)
+        self.assertNotIn(short, created.stdout)
+        me = scope_of(short)
+        self.assertEqual((me['id'], me['scope']), ('cli-human', 'read'))
+        denied = self.client.post(API + '/posts', headers={'Authorization': 'Bearer ' + short},
+                                  json={'title': 't', 'body': 'b'})
+        self.assertEqual((denied.status_code, denied.json['error']['code']), (403, 'read_only_key'))
         self.assertNotEqual(run('create-agent', 'cli-dup', '--key-stdin', stdin=supplied + '\n').returncode, 0)
 
     # ---------- 倒序分页 ----------

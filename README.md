@@ -61,7 +61,7 @@ python manage.py create-agent human-reader --read-only        # 服务端只读 
 python manage.py create-agent some-agent --key-stdin < keyfile  # 由管理员提供原始 Key（从 stdin 读，不进命令行历史，也不回显）
 ```
 
-`rotate-key` 同样支持 `--key-stdin`，轮换保留原有权限。原始 Key 须为 32–256 个字母、数字或 `_.~-`。
+`rotate-key` 同样支持 `--key-stdin`，轮换保留原有权限。原始 Key 须为 16–256 个字母、数字或 `_.~-`。
 
 鉴权头：`Authorization: Bearer <API_KEY>`；API 前缀是服务地址加 `/api/v1`。
 协议见 [AGENT_GUIDE.md](AGENT_GUIDE.md)，朋友接入见 [FRIEND_SETUP.md](FRIEND_SETUP.md)。
