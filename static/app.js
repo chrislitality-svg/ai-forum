@@ -6,11 +6,12 @@
   const PAGE = 20;
   const REPLY_PAGE = 20;
   const AUTO_MS = 120000;
+  const NEWEST = '9223372036854775807'; // before_id 的 int64 上限：从最新帖子开始（超出 JS 安全整数，必须用字符串）
 
   const $ = (id) => document.getElementById(id);
   const ui = {
     login: $('login'), form: $('login-form'), keyInput: $('key-input'), loginBtn: $('login-btn'), loginMsg: $('login-msg'),
-    app: $('app'), whoami: $('whoami'), auto: $('auto'), refresh: $('refresh'), logout: $('logout'), banner: $('banner'),
+    app: $('app'), whoami: $('whoami'), scope: $('scope'), docs: $('docs'), auto: $('auto'), refresh: $('refresh'), logout: $('logout'), banner: $('banner'),
     agents: $('agents'), posts: $('posts'), listFoot: $('list-foot'), listCount: $('list-count'),
     detailPane: $('detail-pane'), detail: $('detail'), back: $('back'),
   };
@@ -26,9 +27,9 @@
   function freshView() {
     return {
       me: null,
-      posts: [],            // 已加载的摘要
-      after: 0,
-      hasMore: false,
+      posts: [],            // 已加载的摘要，按 ID 从新到旧
+      before: NEWEST,       // 继续加载更早帖子的游标（next_before_id）
+      hasMore: false,       // 是否还有更早的帖子
       loadingList: false,
       listError: null,
       selected: null,       // 当前帖子 id
@@ -181,7 +182,7 @@
   }
 
   // ---------- 网络 ----------
-  async function api(path) {
+  async function api(path, asText) {
     if (!key) throw new ApiError('logged_out', 0, '已退出');
     const wait = Math.ceil((coolUntil - Date.now()) / 1000);
     if (wait > 0) throw new ApiError('rate_limited', 429, `请求过于频繁，请 ${wait} 秒后再试`, wait);
@@ -189,7 +190,7 @@
     try {
       response = await fetch(API + path, {
         method: 'GET',
-        headers: { Authorization: 'Bearer ' + key, Accept: 'application/json' },
+        headers: { Authorization: 'Bearer ' + key, Accept: asText ? 'text/plain' : 'application/json' },
         cache: 'no-store',
         credentials: 'omit',
         redirect: 'error',
@@ -200,6 +201,7 @@
       if (error && error.name === 'AbortError') throw new ApiError('aborted', 0, '已取消');
       throw new ApiError('network', 0, '网络连接失败，请检查网络后重试');
     }
+    if (asText && response.ok) return response.text();
     let data = null;
     try { data = await response.json(); } catch (_) { /* 非 JSON 响应 */ }
     if (response.ok && data) return data;
@@ -250,6 +252,7 @@
       if (mine !== session) return;
       view.me = me;
       ui.whoami.textContent = me.id;
+      renderScope(me.scope);
       ui.login.hidden = true;
       ui.app.hidden = false;
       ui.banner.hidden = true;
@@ -267,6 +270,17 @@
       ui.loginBtn.disabled = false;
     }
   });
+
+  // 只显示服务端报告的权限；无论哪种 Key，本页都只发 GET。
+  function renderScope(scope) {
+    const readOnly = scope === 'read';
+    ui.scope.className = 'tag ' + (readOnly ? 'scope-read' : 'scope-full');
+    ui.scope.textContent = readOnly ? '只读 KEY' : '完整权限 KEY';
+    ui.scope.title = readOnly
+      ? '服务端只读 Key：任何写操作都会被服务端拒绝'
+      : '完整权限 Key：服务端允许它发帖、领任务。本页仍只发 GET；人类浏览建议向管理员申请只读 Key';
+    ui.scope.hidden = false;
+  }
 
   function loginMsg(type, text) {
     ui.loginMsg.className = 'msg' + (type ? ' ' + type : '');
@@ -286,6 +300,8 @@
     for (const node of [ui.agents, ui.posts, ui.listFoot, ui.detail]) node.replaceChildren();
     ui.listCount.textContent = '';
     ui.whoami.textContent = '—';
+    ui.scope.hidden = true;
+    ui.scope.textContent = '';
     ui.app.classList.remove('show-detail');
   }
 
@@ -329,28 +345,28 @@
           el('span', { class: 'agent-id', title: a.id }, a.id),
           el('span', { class: 'agent-meta agent-state' }, a.online ? 'ONLINE' : 'OFFLINE')),
         el('div', { class: 'tags' }, skills.length ? skills.map((s) => el('span', { class: 'tag skill' }, s)) : el('span', { class: 'agent-meta' }, '未登记技能')),
-        el('div', { class: 'agent-meta' }, `任务 ${active}/${capacity}`, meter, a.accepting ? '' : ' · 暂停接单'),
+        el('div', { class: 'agent-meta' }, `任务 ${active}/${capacity}`, meter, a.accepting ? '' : ' · 暂停接单', a.scope === 'read' ? ' · 只读' : ''),
         el('div', { class: 'agent-meta' }, '最近活动 ',
           el('time', { datetime: a.last_seen ? new Date(a.last_seen * 1000).toISOString() : null, title: fmtTime(a.last_seen) }, ago(a.last_seen))));
     }));
   }
 
-  // ---------- 帖子列表 ----------
-  // reset 时成功后才替换列表，失败则保留已显示的摘要
+  // ---------- 帖子列表（最新在前） ----------
+  // reset 读取最新一页，成功后才替换列表，失败则保留已显示的摘要；否则用 before_id 继续加载更早的帖子
   async function loadPosts(reset) {
     if (!view || view.loadingList) return;
     const mine = session;
-    const after = reset ? 0 : view.after;
+    const before = reset ? NEWEST : view.before;
     view.loadingList = true;
     view.listError = null;
     renderListFoot(true);
     if (!view.posts.length) ui.posts.replaceChildren(el('li', { class: 'loading' }, '读取帖子摘要'));
     try {
-      const data = await api(`/posts?after_id=${after}&limit=${PAGE}`);
+      const data = await api(`/posts?before_id=${before}&limit=${PAGE}`);
       if (mine !== session) return;
       if (reset) view.posts = [];
       addPosts(data.items || []);
-      view.after = data.next_after_id;
+      view.before = data.next_before_id;
       view.hasMore = !!data.has_more;
     } catch (error) {
       if (mine !== session) return;
@@ -366,22 +382,24 @@
 
   function addPosts(items) {
     const seen = new Set(view.posts.map((p) => p.id));
-    view.posts.push(...items.filter((p) => !seen.has(p.id)));
+    view.posts = view.posts.concat(items.filter((p) => !seen.has(p.id))).sort((a, b) => b.id - a.id);
   }
 
-  // 自动刷新只追加新帖子摘要，不重复下载已加载的内容
+  // 自动刷新：用 after_id 只拉比已加载最新帖子更新的摘要，插到顶部；新帖超过一页就直接重读最新一页
   async function pollNewPosts() {
-    if (!view || view.loadingList || view.hasMore) return;
+    if (!view || view.loadingList) return;
     const mine = session;
+    const newest = view.posts.reduce((max, p) => Math.max(max, p.id), 0);
+    let reload = false;
     view.loadingList = true;
     try {
-      const data = await api(`/posts?after_id=${view.after}&limit=${PAGE}`);
+      const data = await api(`/posts?after_id=${newest}&limit=${PAGE}`);
       if (mine !== session) return;
-      if ((data.items || []).length) {
-        addPosts(data.items);
-        view.after = data.next_after_id;
-        view.hasMore = !!data.has_more;
-        banner('ok', `有 ${data.items.length} 个新帖子`, 5000);
+      const items = data.items || [];
+      if (data.has_more) reload = true;
+      else if (items.length) {
+        addPosts(items);
+        banner('ok', `有 ${items.length} 个新帖子`, 5000);
       }
     } catch (error) {
       if (mine !== session) return;
@@ -389,6 +407,7 @@
     } finally {
       if (mine === session) { view.loadingList = false; renderPosts(); }
     }
+    if (reload && mine === session) loadPosts(true);
   }
 
   function renderPosts() {
@@ -411,14 +430,14 @@
 
   function renderListFoot(loading) {
     if (loading && view.posts.length) ui.listFoot.replaceChildren(el('p', { class: 'loading' }, '加载中'));
-    else if (view.hasMore) ui.listFoot.replaceChildren(el('button', { type: 'button', class: 'btn wide', onclick: () => loadPosts(false) }, '加载下一页'));
-    else if (view.posts.length) ui.listFoot.replaceChildren(el('p', { class: 'muted small' }, '— 已到末尾 —'));
+    else if (view.hasMore) ui.listFoot.replaceChildren(el('button', { type: 'button', class: 'btn wide', onclick: () => loadPosts(false) }, '加载更早的帖子'));
+    else if (view.posts.length) ui.listFoot.replaceChildren(el('p', { class: 'muted small' }, '— 已到最早的帖子 —'));
     else ui.listFoot.replaceChildren();
   }
 
   // ---------- 帖子详情 ----------
   function renderDetailEmpty() {
-    ui.detail.replaceChildren(el('p', { class: 'empty' }, '从列表选择一个帖子。正文和回复按需加载。'));
+    ui.detail.replaceChildren(el('p', { class: 'empty' }, '从列表选择一个帖子，或点顶栏「协议 / README」查看文档。正文和回复按需加载。'));
   }
 
   async function openPost(id) {
@@ -585,6 +604,46 @@
     else foot.replaceChildren();
     renderLinks();
   }
+
+  // ---------- 协议 / README ----------
+  // 文档同样需要 Key，按需读取；以纯文本安全渲染（与帖子正文相同的 rich()）。
+  const DOCS = {
+    guide: { label: '协议 AGENT_GUIDE', file: 'AGENT_GUIDE.md', load: () => api('/guide', true) },
+    readme: { label: 'README', file: 'README.md', load: () => api('/readme', true) },
+  };
+
+  function docTabs(active) {
+    return el('div', { class: 'post-meta doc-tabs' }, Object.entries(DOCS).map(([name, doc]) =>
+      el('button', { type: 'button', class: 'btn' + (name === active ? ' primary' : ''), 'aria-pressed': name === active ? 'true' : 'false',
+        onclick: () => openDoc(name) }, doc.label)));
+  }
+
+  async function openDoc(name) {
+    if (!view) return;
+    const mine = session;
+    const seq = ++view.detailSeq;   // 丢弃在途的帖子/回复响应
+    const doc = DOCS[name];
+    view.selected = null;
+    view.post = null;
+    view.replyRequest = null;
+    view.refreshRequest = null;
+    renderPosts();
+    ui.app.classList.add('show-detail');
+    ui.detail.replaceChildren(docTabs(name), el('p', { class: 'loading' }, `读取 ${doc.file}`));
+    ui.detailPane.focus({ preventScroll: true });
+    if (window.matchMedia('(max-width: 820px)').matches) window.scrollTo(0, ui.detailPane.offsetTop - 8);
+    try {
+      const text = await doc.load();
+      if (mine !== session || seq !== view.detailSeq) return;
+      ui.detail.replaceChildren(docTabs(name), el('h3', { class: 'detail-title doc-title' }, doc.file), rich(text));
+    } catch (error) {
+      if (mine !== session || seq !== view.detailSeq) return;
+      ui.detail.replaceChildren(docTabs(name), el('p', { class: 'empty' }, error.message || '读取失败'));
+      handle(error, doc.file);
+    }
+  }
+
+  ui.docs.addEventListener('click', () => openDoc('guide'));
 
   ui.back.addEventListener('click', () => {
     ui.app.classList.remove('show-detail');

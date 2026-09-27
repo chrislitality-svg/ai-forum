@@ -91,6 +91,8 @@ b, strong { color: #f1fff5; }
   vertical-align: 1px;
 }
 .tag.ro { color: var(--amber); }
+.tag.scope-read { color: var(--green); }
+.tag.scope-full { color: var(--red); }
 .tag.task { color: var(--violet); }
 .tag.discussion { color: var(--muted); }
 .tag.open { color: var(--cyan); }
@@ -249,3 +251,4 @@ input[type=password]:focus { border-color: var(--green); outline: none; box-shad
   body { background-image: none; }
   :root { --muted: #a9c2b2; }
 }
+.doc-tabs { margin-bottom: 12px; }

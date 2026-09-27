@@ -73,6 +73,7 @@ class BrowserRegressionTests(unittest.TestCase):
         db = os.path.join(cls.temp.name, 'forum.db')
         app = create_app(db)
         cls.keys = {name: provision(db, name) for name in ('local-agent', 'friend-agent')}
+        cls.keys['human-reader'] = provision(db, 'human-reader', scope='read')
         client = app.test_client()
 
         def create(path, data):
@@ -80,6 +81,8 @@ class BrowserRegressionTests(unittest.TestCase):
             assert response.status_code == 201, response.json
             return response.json['id']
 
+        # 较早的填充帖：让列表超过一页；两个主测试帖最新，保证出现在第一页
+        cls.fillers = [create('/posts', {'title': f'填充帖 {i + 1}', 'body': '填充'}) for i in range(22)]
         cls.long_post = create('/posts', {'title': '长回复帖', 'body': '正文'})
         for i in range(25):
             create(f'/posts/{cls.long_post}/replies', {'body': f'长帖回复 {i + 1}'})
@@ -221,6 +224,51 @@ class BrowserRegressionTests(unittest.TestCase):
         self.page.wait_for_selector('.post-item')
         self.open_post('另一个帖子')
         self.wait_replies(3)
+
+    # ---------- 最新在前 / 文档入口 / Key 权限 ----------
+    def post_ids(self):
+        return self.page.eval_on_selector_all('.post-id', 'nodes => nodes.map(n => parseInt(n.textContent.slice(1), 10))')
+
+    def test_newest_first_and_load_older(self):
+        methods = []
+        self.page.on('request', lambda request: methods.append(request.method) if '/api/' in request.url else None)
+        self.login()
+        ids = self.post_ids()
+        self.assertEqual(len(ids), 20)
+        self.assertEqual(ids[0], self.other_post)
+        self.assertEqual(ids, sorted(ids, reverse=True))
+        self.page.click('text=加载更早的帖子')
+        self.page.wait_for_function('() => document.querySelectorAll(".post-item").length === 24')
+        ids = self.post_ids()
+        self.assertEqual(ids, sorted(ids, reverse=True))
+        self.assertEqual(len(set(ids)), 24)
+        self.assertEqual(ids[-1], self.fillers[0])
+        self.page.wait_for_selector('text=已到最早的帖子')
+        posts = [p for p in self.proxy.requests if p.startswith(f'{API}/posts?')]
+        self.assertEqual(posts, [f'{API}/posts?before_id=9223372036854775807&limit=20',
+                                 f'{API}/posts?before_id={ids[19]}&limit=20'])
+        self.assertEqual(set(methods), {'GET'})
+
+    def test_docs_entry_shows_guide_and_readme(self):
+        self.login()
+        self.page.click('#docs')
+        self.page.wait_for_function('() => document.querySelector(".doc-title") && document.querySelector(".doc-title").textContent === "AGENT_GUIDE.md"')
+        self.assertIn('/api/v1/readme', self.page.inner_text('#detail'))
+        self.page.click('.doc-tabs button:has-text("README")')
+        self.page.wait_for_function('() => document.querySelector(".doc-title")?.textContent === "README.md"')
+        self.assertIn('AI Forum', self.page.inner_text('#detail'))
+        self.assertEqual(self.page.locator('#detail script').count(), 0)
+        # 文档与帖子共用详情区：切回帖子仍正常
+        self.open_post('另一个帖子')
+        self.wait_replies(3)
+
+    def test_scope_badge_reflects_server_scope(self):
+        self.login(self.keys['human-reader'])
+        self.assertEqual(self.page.inner_text('#scope'), '只读 KEY')
+        self.page.click('#logout')
+        self.assertTrue(self.page.is_hidden('#scope'))
+        self.login(self.keys['friend-agent'])
+        self.assertEqual(self.page.inner_text('#scope'), '完整权限 KEY')
 
     # ---------- 其他错误状态 ----------
     def test_wrong_key_shows_error_and_no_data(self):

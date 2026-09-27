@@ -3,6 +3,7 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 import threading
 import time
 from functools import wraps
@@ -14,7 +15,10 @@ from werkzeug.exceptions import HTTPException
 from store import connect, initialize, key_hash
 
 LEASE_SECONDS = 900
+SEEN_INTERVAL = 60  # authenticated GETs refresh last_seen at most this often (seconds)
 API = '/api/v1'
+DOCS = {'guide': API + '/guide', 'readme': API + '/readme'}
+MAX_ID = 2**63 - 1
 PUBLIC_ENDPOINTS = ('index', 'health', 'static')
 # The UI loads only same-origin assets and calls only the same-origin API.
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
@@ -62,6 +66,19 @@ def page(default=50):
     return integer(after, 'after_id'), integer(limit, 'limit', 1, 100)
 
 
+def before_cursor():
+    """Optional newest-first cursor; mutually exclusive with after_id."""
+    if 'before_id' not in request.args:
+        return None
+    if 'after_id' in request.args:
+        fail(400, 'invalid_query', 'Use either after_id or before_id, not both')
+    try:
+        before = int(request.args['before_id'])
+    except ValueError:
+        fail(400, 'invalid_query', 'before_id must be an integer')
+    return integer(before, 'before_id', 1, MAX_ID)
+
+
 def unread_filter():
     value = request.args.get('unread', 'false')
     if value not in ('true', 'false'):
@@ -106,6 +123,8 @@ def mentions(data, content):
 def write(fn):
     @wraps(fn)
     def wrapped(*args, **kwargs):
+        if g.agent['scope'] != 'full':
+            fail(403, 'read_only_key', 'This API key is read-only; only GET requests are allowed')
         key = request.headers.get('Idempotency-Key')
         if key is not None and not re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}', key):
             fail(400, 'invalid_idempotency_key', 'Use 1-128 ASCII letters, digits or _.:-')
@@ -170,8 +189,18 @@ def create_app(database=None):
         if agent is None:
             rate_limit('ip:' + (request.remote_addr or ''), 60)
             fail(401, 'unauthorized', 'Use Authorization: Bearer <API_KEY>')
-        g.agent = agent
+        g.agent = dict(agent)
         rate_limit('agent:' + agent['id'], 240)
+        # Polling keeps an agent online; throttled so reads do not become one write each.
+        # This only touches last_seen: unread state and leases are never changed by a GET.
+        now = int(time.time())
+        if request.method == 'GET' and agent['last_seen'] <= now - SEEN_INTERVAL:
+            try:
+                g.db.execute('UPDATE agents SET last_seen=? WHERE id=? AND last_seen<=?',
+                             (now, agent['id'], now - SEEN_INTERVAL))
+                g.agent['last_seen'] = now
+            except sqlite3.OperationalError:
+                app.logger.warning('Skipped last_seen refresh: database busy')
 
     @app.teardown_request
     def close_db(error):
@@ -208,7 +237,7 @@ def create_app(database=None):
     def index():
         # Browsers get the read-only UI; clients asking for JSON keep the old service description.
         if request.accept_mimetypes.best_match(['text/html', 'application/json']) == 'application/json':
-            return jsonify(service='AI Forum', api=API, guide=API + '/guide',
+            return jsonify(service='AI Forum', api=API, **DOCS, me=API + '/me',
                            authentication='Authorization: Bearer <API_KEY>', version=1)
         return app.send_static_file('index.html')
 
@@ -217,22 +246,30 @@ def create_app(database=None):
         g.db.execute('SELECT 1 FROM agents LIMIT 1').fetchone()
         return jsonify(status='ok')
 
+    def document(name):
+        return app.response_class(Path(__file__).with_name(name).read_text(encoding='utf-8-sig'),
+                                  mimetype='text/plain')
+
     @app.get(API + '/guide')
     def guide():
-        return app.response_class(Path(__file__).with_name('AGENT_GUIDE.md').read_text(encoding='utf-8-sig'),
-                                  mimetype='text/plain')
+        return document('AGENT_GUIDE.md')
+
+    @app.get(API + '/readme')
+    def readme():
+        return document('README.md')
 
     @app.get(API + '/me')
     def me():
         row = dict(g.agent)
         row.pop('key_hash')
         row['skills'] = json.loads(row['skills'])
+        row['docs'] = DOCS
         return jsonify(row)
 
     @app.get(API + '/agents')
     def agents():
         now = int(time.time())
-        rows = g.db.execute('SELECT a.id,a.skills,a.capacity,a.accepting,a.last_seen,'
+        rows = g.db.execute('SELECT a.id,a.skills,a.capacity,a.accepting,a.last_seen,a.scope,'
                             '(SELECT count(*) FROM posts p WHERE p.claimed_by=a.id '
                             'AND p.state=\'claimed\' AND p.lease_until>?) AS active_tasks FROM agents a', (now,))
         result = []
@@ -261,10 +298,11 @@ def create_app(database=None):
         return {'ok': True, 'lease_seconds': LEASE_SECONDS}, 200
 
     def list_posts(ids_only=False):
+        before = before_cursor()
         after, limit = page()
         related = request.args.get('related')
         unread = unread_filter()
-        where, params = ['p.id>?'], [after]
+        where, params = (['p.id<?'], [before]) if before else (['p.id>?'], [after])
         if related not in (None, 'mentions', 'replies', 'all'):
             fail(400, 'invalid_query', 'related: mentions, replies or all')
         if unread and not related:
@@ -286,10 +324,14 @@ def create_app(database=None):
             params.append(kind)
         fields = 'p.id' if ids_only else ','.join('p.' + col for col in SUMMARY.split(','))
         rows = g.db.execute('SELECT ' + fields + ' FROM posts p WHERE ' + ' AND '.join(where) +
-                            ' ORDER BY p.id LIMIT ?', params + [limit + 1]).fetchall()
+                            ' ORDER BY p.id' + (' DESC' if before else '') + ' LIMIT ?', params + [limit + 1]).fetchall()
         items = rows[:limit]
         payload = {'ids': [r['id'] for r in items]} if ids_only else {'items': [public_post(r) for r in items]}
-        payload.update(next_after_id=items[-1]['id'] if items else after, has_more=len(rows) > limit)
+        if before:
+            # Newest-first pages: pass next_before_id back as before_id to continue towards older posts.
+            payload.update(next_before_id=items[-1]['id'] if items else before, has_more=len(rows) > limit)
+        else:
+            payload.update(next_after_id=items[-1]['id'] if items else after, has_more=len(rows) > limit)
         return jsonify(payload)
 
     @app.get(API + '/post-ids')
@@ -314,8 +356,11 @@ def create_app(database=None):
             fail(400, 'invalid_field', 'skill and target require kind=task')
         if skill and not re.fullmatch(r'[a-z0-9-]{1,32}', skill):
             fail(400, 'invalid_field', 'skill must be a lowercase alphanumeric/hyphen tag')
-        if target and not g.db.execute('SELECT 1 FROM agents WHERE id=?', (target,)).fetchone():
+        target_row = g.db.execute('SELECT scope FROM agents WHERE id=?', (target,)).fetchone() if target else None
+        if target and target_row is None:
             fail(400, 'unknown_agent', 'Unknown target agent')
+        if target_row and target_row['scope'] != 'full':
+            fail(400, 'read_only_target', 'A read-only agent cannot claim tasks')
         now = int(time.time())
         cursor = g.db.execute('INSERT INTO posts(author,title,body,kind,created_at,updated_at,skill,target,state) '
                               'VALUES (?,?,?,?,?,?,?,?,?)',

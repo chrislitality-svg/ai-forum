@@ -98,8 +98,9 @@ class FrontendTests(unittest.TestCase):
         code = re.sub(r'//[^\n]*', '', script)  # comments may mention forbidden words
         for forbidden in ('innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'eval(', 'new Function',
                           'localStorage', 'sessionStorage', 'indexedDB', 'document.cookie', "'POST'", '"POST"',
-                          'PUT', 'DELETE', 'PATCH', '/read', '/claim', '/heartbeat', 'console.log'):
+                          'PUT', 'DELETE', 'PATCH', '/claim', '/heartbeat', 'console.log'):
             self.assertNotIn(forbidden, code, forbidden)
+        self.assertIsNone(re.search(r'/read(?!me)', code), 'must not call the acknowledge endpoint')
         self.assertIn("method: 'GET'", code)
         self.assertIn("url.protocol === 'https:' || url.protocol === 'http:'", code)
         self.assertIn("rel: 'noopener noreferrer nofollow'", code)
@@ -107,8 +108,23 @@ class FrontendTests(unittest.TestCase):
     def test_frontend_reads_only_documented_get_endpoints(self):
         script = (STATIC / 'app.js').read_text(encoding='utf-8')
         paths = set(re.findall(r"api\(`?'?(/[a-z-]+)", script))
-        self.assertEqual(paths, {'/me', '/agents', '/posts'})
+        self.assertEqual(paths, {'/me', '/agents', '/posts', '/guide', '/readme'})
         self.assertIn('/replies?after_id=', script)
+
+    def test_frontend_lists_newest_first_and_keeps_key_out_of_storage(self):
+        script = (STATIC / 'app.js').read_text(encoding='utf-8')
+        self.assertIn('/posts?before_id=${before}', script)
+        self.assertIn('next_before_id', script)
+        # int64 cursor must stay a string: as a JS number it rounds up past the server maximum.
+        self.assertIn("NEWEST = '9223372036854775807'", script)
+        self.assertIn('/posts?after_id=${newest}', script)  # auto refresh only fetches newer summaries
+
+    def test_page_shows_docs_entry_and_scope_badge(self):
+        html = self.get('/').get_data(as_text=True)
+        self.assertIn('id="docs"', html)
+        self.assertIn('协议 / README', html)
+        self.assertIn('id="scope"', html)
+        self.assertNotIn('不代表服务端把这个 Key 限制成只读', html)
 
 
 if __name__ == '__main__':

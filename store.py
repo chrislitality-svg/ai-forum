@@ -7,7 +7,8 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (
     id TEXT PRIMARY KEY, key_hash TEXT NOT NULL UNIQUE,
     skills TEXT NOT NULL DEFAULT '[]', capacity INTEGER NOT NULL DEFAULT 1,
-    accepting INTEGER NOT NULL DEFAULT 1, last_seen INTEGER NOT NULL DEFAULT 0
+    accepting INTEGER NOT NULL DEFAULT 1, last_seen INTEGER NOT NULL DEFAULT 0,
+    scope TEXT NOT NULL DEFAULT 'full'
 );
 CREATE TABLE IF NOT EXISTS posts (
     id INTEGER PRIMARY KEY AUTOINCREMENT, author TEXT NOT NULL REFERENCES agents(id),
@@ -40,6 +41,8 @@ CREATE TABLE IF NOT EXISTS idempotency (
 CREATE INDEX IF NOT EXISTS idempotency_created ON idempotency(created_at);
 """
 
+SCOPES = ('full', 'read')
+
 
 def connect(path):
     db = sqlite3.connect(path, timeout=15, isolation_level=None)
@@ -55,6 +58,9 @@ def initialize(path):
     try:
         db.execute('PRAGMA journal_mode=WAL')
         db.executescript(SCHEMA)
+        # Databases created before key scopes existed: existing keys keep full access.
+        if 'scope' not in {row['name'] for row in db.execute('PRAGMA table_info(agents)')}:
+            db.execute("ALTER TABLE agents ADD COLUMN scope TEXT NOT NULL DEFAULT 'full'")
     finally:
         db.close()
 
@@ -63,20 +69,28 @@ def key_hash(key):
     return hashlib.sha256(key.encode()).hexdigest()
 
 
-def provision(path, agent_id, rotate=False):
+def provision(path, agent_id, rotate=False, scope='full', key=None):
+    """Create an agent or rotate its key. Returns the raw key; rotation keeps the scope."""
     import re
     if not re.fullmatch(r'[a-z][a-z0-9-]{1,39}', agent_id):
         raise ValueError('Agent ID must be 2-40 lowercase letters, digits or hyphens')
-    key = 'aif_' + secrets.token_urlsafe(32)
+    if scope not in SCOPES:
+        raise ValueError('Scope must be full or read')
+    if key is None:
+        key = 'aif_' + secrets.token_urlsafe(32)
+    elif not re.fullmatch(r'[A-Za-z0-9_.~-]{32,256}', key):
+        raise ValueError('Key must be 32-256 characters of letters, digits or _.~-')
     db = connect(path)
     try:
         db.execute('BEGIN IMMEDIATE')
+        if db.execute('SELECT 1 FROM agents WHERE key_hash=?', (key_hash(key),)).fetchone():
+            raise ValueError('Key is already in use')
         if rotate:
             if not db.execute('UPDATE agents SET key_hash=? WHERE id=?',
                               (key_hash(key), agent_id)).rowcount:
                 raise ValueError('Unknown agent')
         else:
-            db.execute('INSERT INTO agents(id,key_hash) VALUES (?,?)', (agent_id, key_hash(key)))
+            db.execute('INSERT INTO agents(id,key_hash,scope) VALUES (?,?,?)', (agent_id, key_hash(key), scope))
         db.commit()
     finally:
         db.close()

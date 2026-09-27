@@ -242,5 +242,236 @@ class ForumTests(unittest.TestCase):
         self.assertEqual(result.headers['Retry-After'], '60')
 
 
+    # ---------- 服务端只读 Key ----------
+    def reader(self):
+        self.keys['human-reader'] = provision(self.path, 'human-reader', scope='read')
+        return 'human-reader'
+
+    def test_read_only_key_rejected_on_every_write_route(self):
+        reader = self.reader()
+        pid = self.task()
+        writes = [('/posts', {'title': 't', 'body': 'b'}), (f'/posts/{pid}/replies', {'body': 'x'}),
+                  ('/me/heartbeat', {}), (f'/posts/{pid}/read', {'through_event_id': 1}),
+                  ('/tasks/claim-next', {}), (f'/tasks/{pid}/claim', {}),
+                  (f'/tasks/{pid}/heartbeat', {'lease_token': 'x'}),
+                  (f'/tasks/{pid}/complete', {'lease_token': 'x', 'result': 'r'}),
+                  (f'/tasks/{pid}/release', {'lease_token': 'x'}), (f'/tasks/{pid}/cancel', {})]
+        routes = {r.rule for r in self.app.url_map.iter_rules() if 'POST' in r.methods}
+        self.assertEqual(len(routes), len(writes), sorted(routes))  # a new write route must be listed here
+        for path, data in writes:
+            response = self.req('POST', path, data, agent=reader, idem='same-key')
+            self.assertEqual(response.status_code, 403, path)
+            self.assertEqual(response.json['error']['code'], 'read_only_key', path)
+        db = connect(self.path)
+        try:
+            self.assertEqual(db.execute('SELECT count(*) FROM posts').fetchone()[0], 1)
+            self.assertEqual(db.execute('SELECT count(*) FROM replies').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT count(*) FROM idempotency').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT state FROM posts WHERE id=?', (pid,)).fetchone()[0], 'open')
+        finally:
+            db.close()
+        for path in ('/me', '/agents', '/posts', '/post-ids', f'/posts/{pid}', f'/posts/{pid}/replies',
+                     '/inbox', '/me/claims', '/guide', '/readme', '/posts?before_id=100'):
+            self.assertEqual(self.req('GET', path, agent=reader).status_code, 200, path)
+
+    def test_scope_reported_and_full_keys_unchanged(self):
+        reader = self.reader()
+        self.assertEqual(self.req('GET', '/me', agent=reader).json['scope'], 'read')
+        me = self.req('GET', '/me').json
+        self.assertEqual(me['scope'], 'full')
+        self.assertEqual(me['docs'], {'guide': API + '/guide', 'readme': API + '/readme'})
+        scopes = {a['id']: a['scope'] for a in self.req('GET', '/agents').json['items']}
+        self.assertEqual((scopes['human-reader'], scopes['friend-agent']), ('read', 'full'))
+        task = {'title': 't', 'body': 'b', 'kind': 'task', 'target': reader}
+        self.assertEqual(self.req('POST', '/posts', task).json['error']['code'], 'read_only_target')
+        self.assertEqual(self.req('POST', '/me/heartbeat', {'skills': ['backend']}).status_code, 200)
+        pid = self.task(skill='backend')
+        self.assertEqual(self.req('POST', f'/tasks/{pid}/claim', {}).status_code, 200)
+        rotated = provision(self.path, reader, rotate=True)
+        self.assertEqual(self.client.get(API + '/me', headers={'Authorization': 'Bearer ' + rotated}).json['scope'], 'read')
+
+    def test_legacy_database_migrates_to_full_scope(self):
+        import sqlite3
+        from store import key_hash
+        path = os.path.join(self.temp.name, 'legacy.db')
+        legacy = sqlite3.connect(path)
+        legacy.executescript("""
+            CREATE TABLE agents (id TEXT PRIMARY KEY, key_hash TEXT NOT NULL UNIQUE,
+                skills TEXT NOT NULL DEFAULT '[]', capacity INTEGER NOT NULL DEFAULT 1,
+                accepting INTEGER NOT NULL DEFAULT 1, last_seen INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, author TEXT NOT NULL REFERENCES agents(id),
+                title TEXT NOT NULL, body TEXT NOT NULL, kind TEXT NOT NULL, created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL, skill TEXT, target TEXT REFERENCES agents(id), state TEXT,
+                claimed_by TEXT REFERENCES agents(id), lease_until INTEGER, lease_token TEXT, result_reply_id INTEGER);
+        """)
+        key = 'legacy_' + os.urandom(16).hex()
+        legacy.execute('INSERT INTO agents(id,key_hash) VALUES (?,?)', ('old-agent', key_hash(key)))
+        legacy.execute("INSERT INTO posts(author,title,body,kind,created_at,updated_at) "
+                       "VALUES ('old-agent','旧帖','旧正文','discussion',1,1)")
+        legacy.commit()
+        legacy.close()
+        client = create_app(path).test_client()
+        create_app(path)  # restart is idempotent
+        headers = {'Authorization': 'Bearer ' + key}
+        self.assertEqual(client.get(API + '/me', headers=headers).json['scope'], 'full')
+        self.assertEqual(client.get(API + '/posts/1', headers=headers).json['body'], '旧正文')
+        self.assertEqual(client.post(API + '/posts/1/replies', headers=headers, json={'body': '迁移后仍可写'}).status_code, 201)
+
+    def test_manage_cli_read_only_and_key_from_stdin(self):
+        import json
+        import subprocess
+        import sys
+
+        def run(*args, stdin=''):
+            return subprocess.run([sys.executable, 'manage.py', '--db', self.path, *args], input=stdin,
+                                  capture_output=True, text=True)
+
+        def scope_of(key):
+            return self.client.get(API + '/me', headers={'Authorization': 'Bearer ' + key}).json
+
+        created = run('create-agent', 'cli-reader', '--read-only')
+        self.assertEqual(created.returncode, 0, created.stderr)
+        result = json.loads(created.stdout)
+        self.assertEqual(result['scope'], 'read')
+        self.assertEqual(scope_of(result['api_key'])['scope'], 'read')
+        supplied = 'test_' + os.urandom(24).hex()  # one-off random key, never a real credential
+        created = run('create-agent', 'cli-supplied', '--read-only', '--key-stdin', stdin=supplied + '\n')
+        self.assertEqual(created.returncode, 0, created.stderr)
+        self.assertNotIn(supplied, created.stdout)
+        me = scope_of(supplied)
+        self.assertEqual((me['id'], me['scope']), ('cli-supplied', 'read'))
+        self.assertNotEqual(run('create-agent', 'cli-short', '--key-stdin', stdin='short\n').returncode, 0)
+        self.assertNotEqual(run('create-agent', 'cli-dup', '--key-stdin', stdin=supplied + '\n').returncode, 0)
+
+    # ---------- 倒序分页 ----------
+    def test_before_id_newest_first_and_after_id_compatible(self):
+        ids = [self.post() for _ in range(5)]
+        first = self.req('GET', f'/posts?before_id={2**63 - 1}&limit=2').json
+        self.assertEqual([p['id'] for p in first['items']], [ids[4], ids[3]])
+        self.assertEqual((first['has_more'], first['next_before_id']), (True, ids[3]))
+        self.assertNotIn('next_after_id', first)
+        self.assertNotIn('body', first['items'][0])
+        second = self.req('GET', f'/post-ids?before_id={first["next_before_id"]}&limit=2').json
+        self.assertEqual(second['ids'], [ids[2], ids[1]])
+        last = self.req('GET', f'/post-ids?before_id={second["next_before_id"]}&limit=2').json
+        self.assertEqual((last['ids'], last['has_more'], last['next_before_id']), ([ids[0]], False, ids[0]))
+        empty = self.req('GET', f'/post-ids?before_id={ids[0]}').json
+        self.assertEqual((empty['ids'], empty['has_more'], empty['next_before_id']), ([], False, ids[0]))
+        forward = self.req('GET', '/post-ids?after_id=0&limit=2').json
+        self.assertEqual((forward['ids'], forward['next_after_id'], forward['has_more']), (ids[:2], ids[1], True))
+        self.assertNotIn('next_before_id', forward)
+        pid = self.task(target='friend-agent')
+        mine = self.req('GET', f'/posts?before_id={2**63 - 1}&related=all', agent='friend-agent').json['items']
+        self.assertEqual([p['id'] for p in mine], [pid])
+        self.assertEqual(self.req('GET', f'/posts?before_id={pid}&kind=task').json['items'], [])
+
+    def test_both_cursors_or_bad_before_id_rejected(self):
+        for query in ('after_id=0&before_id=5', 'before_id=5&after_id=1', 'before_id=0', 'before_id=-3',
+                      'before_id=x', f'before_id={2**63}'):
+            for path in ('/posts', '/post-ids'):
+                response = self.req('GET', f'{path}?{query}')
+                self.assertEqual(response.status_code, 400, (path, query))
+        self.assertEqual(self.req('GET', '/posts?after_id=0&before_id=5').json['error']['code'], 'invalid_query')
+
+    # ---------- 在线状态 ----------
+    def last_seen(self, agent, value=None):
+        db = connect(self.path)
+        try:
+            if value is not None:
+                db.execute('UPDATE agents SET last_seen=? WHERE id=?', (value, agent))
+            return db.execute('SELECT last_seen FROM agents WHERE id=?', (agent,)).fetchone()[0]
+        finally:
+            db.close()
+
+    def test_get_polling_keeps_agent_online_with_throttled_writes(self):
+        import time
+
+        def online():
+            return {a['id']: a['online'] for a in self.req('GET', '/agents').json['items']}
+
+        self.last_seen('friend-agent', 0)
+        self.assertFalse(online()['friend-agent'])
+        self.req('GET', '/inbox?unread=true', agent='friend-agent')
+        refreshed = self.last_seen('friend-agent')
+        self.assertGreater(refreshed, time.time() - 5)
+        self.assertTrue(online()['friend-agent'])
+        recent = refreshed - 30  # inside the 60 s window: no write
+        self.last_seen('friend-agent', recent)
+        self.req('GET', '/posts', agent='friend-agent')
+        self.assertEqual(self.last_seen('friend-agent'), recent)
+        self.last_seen('friend-agent', refreshed - 61)
+        self.req('GET', '/me', agent='friend-agent')
+        self.assertGreater(self.last_seen('friend-agent'), refreshed - 5)
+        self.last_seen('friend-agent', 0)  # failed authentication is not activity
+        self.client.get(API + '/me', headers={'Authorization': 'Bearer aif_wrong'})
+        self.assertEqual(self.last_seen('friend-agent'), 0)
+
+    def test_get_polling_does_not_clear_unread_or_touch_leases(self):
+        pid = self.task(target='friend-agent', body='@friend-agent 请处理')
+        token = self.req('POST', f'/tasks/{pid}/claim', {}, agent='friend-agent').json['lease_token']
+        db = connect(self.path)
+        lease = db.execute('SELECT lease_until FROM posts WHERE id=?', (pid,)).fetchone()[0]
+        db.close()
+        self.last_seen('friend-agent', 0)
+        for path in (f'/posts/{pid}', f'/posts/{pid}/replies', '/inbox', '/posts?related=all&unread=true', '/me/claims'):
+            self.assertEqual(self.req('GET', path, agent='friend-agent').status_code, 200)
+        self.assertEqual(len(self.req('GET', '/inbox?unread=true', agent='friend-agent').json['items']), 2)
+        db = connect(self.path)
+        self.assertEqual(db.execute('SELECT lease_until FROM posts WHERE id=?', (pid,)).fetchone()[0], lease)
+        db.close()
+        self.assertEqual(self.req('GET', '/me/claims', agent='friend-agent').json['items'][0]['lease_token'], token)
+
+    # ---------- 文档与续期示例 ----------
+    def test_readme_and_guide_require_key_and_are_linked(self):
+        for path in ('/readme', '/guide'):
+            self.assertEqual(self.client.get(API + path).status_code, 401, path)
+            response = self.req('GET', path)
+            self.assertEqual((response.status_code, response.mimetype), (200, 'text/plain'), path)
+        self.assertIn('# AI Forum', self.req('GET', '/readme').text)
+        self.assertIn('/api/v1/readme', self.req('GET', '/guide').text)
+        info = self.client.get('/', headers={'Accept': 'application/json'}).json
+        self.assertEqual((info['guide'], info['readme'], info['me']), (API + '/guide', API + '/readme', API + '/me'))
+
+    def test_renew_reference_script_extends_lease_and_stops_on_invalid_lease(self):
+        import contextlib
+        import io
+        import threading
+        import time
+        from werkzeug.serving import WSGIRequestHandler, make_server
+        import renew
+
+        class Quiet(WSGIRequestHandler):
+            def log(self, *args, **kwargs):
+                pass
+
+        server = make_server('127.0.0.1', 0, self.app, threaded=True, request_handler=Quiet)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f'http://127.0.0.1:{server.server_port}{API}'  # local test server only, never the real forum
+        try:
+            pid = self.task()
+            self.req('POST', f'/tasks/{pid}/claim', {})
+            db = connect(self.path)
+            db.execute('UPDATE posts SET lease_until=? WHERE id=?', (int(time.time()) + 5, pid))
+            db.close()
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(renew.renew(base, self.keys['local-agent'], pid, interval=0, rounds=2), 0)
+                self.assertGreater(self.req('GET', '/me/claims').json['items'][0]['lease_until'], time.time() + 600)
+                # Lease lost while the loop runs (author cancels): the script must stop on 409.
+                pid = self.task(agent='friend-agent')
+                self.req('POST', f'/tasks/{pid}/claim', {})
+                result = []
+                worker = threading.Thread(target=lambda: result.append(
+                    renew.renew(base, self.keys['local-agent'], pid, interval=0.2)))
+                worker.start()
+                time.sleep(0.3)
+                self.assertEqual(self.req('POST', f'/tasks/{pid}/cancel', {}, agent='friend-agent').status_code, 200)
+                worker.join(5)
+                self.assertEqual(result, [409])
+                self.assertEqual(renew.renew(base, self.keys['local-agent'], 999, interval=0), 409)
+        finally:
+            server.shutdown()
+            thread.join(5)
+
 if __name__ == '__main__':
     unittest.main()
