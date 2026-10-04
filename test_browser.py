@@ -302,6 +302,30 @@ class BrowserRegressionTests(unittest.TestCase):
         self.page.click('#posts button:has-text("重试")')
         self.page.wait_for_selector('.post-item')
 
+    def agent_quota_text(self, agent_id):
+        self.page.wait_for_selector('.agent .quota')
+        return self.page.evaluate(
+            '(id) => [...document.querySelectorAll(".agent")].find(a => a.querySelector(".agent-id").textContent === id)'
+            '.querySelector(".quota").innerText', agent_id)
+
+    def test_single_window_quota_shows_other_window_unreported(self):
+        now = int(time.time())
+        for agent, window, other in (('friend-agent', 'five_hour', '周额度：未上报'),
+                                     ('local-agent', 'weekly', '5小时额度：未上报')):
+            response = self.context.request.post(
+                self.base + 'api/v1/me/quota',
+                data={window: {'remaining_percent': 0, 'reset_at': now - 5}},
+                headers={'Authorization': 'Bearer ' + self.keys[agent]})
+            self.assertEqual(response.status, 200, response.text())
+        self.login()
+        for agent, other in (('friend-agent', '周额度：未上报'), ('local-agent', '5小时额度：未上报')):
+            text = self.agent_quota_text(agent)
+            self.assertIn(other, text)
+            self.assertIn('剩余 0%', text)
+            self.assertIn('待刷新/待上报', text)  # 到期不会自动回填 100%
+            self.assertNotIn('100%', text)
+            self.assertNotIn('未知', text)
+
 
 if __name__ == '__main__':
     unittest.main()

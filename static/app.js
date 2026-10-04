@@ -23,6 +23,9 @@
   let coolUntil = 0;
   let autoTimer = null;
   let view = null;
+  let quotaTimer = null;  // 单个本地倒计时定时器；每次渲染复用，退出时清除
+  let quotaClock = 0;     // 服务器时间 - 本地时间（毫秒），用 server_time 校正倒计时
+  let quotaTicks = [];    // 当前卡片上的倒计时节点
 
   function freshView() {
     return {
@@ -245,6 +248,7 @@
     coolUntil = 0;
     clearInterval(autoTimer);
     autoTimer = null;
+    stopQuotaTimer();
     ui.auto.checked = false;
     for (const node of [ui.agents, ui.posts, ui.listFoot, ui.detail]) node.replaceChildren();
     ui.listCount.textContent = '';
@@ -281,6 +285,7 @@
   }
 
   function renderAgents(items) {
+    quotaTicks = [];
     if (!items.length) { ui.agents.replaceChildren(el('p', { class: 'empty' }, '暂无 agent')); return; }
     ui.agents.replaceChildren(...items.map((a) => {
       const capacity = Math.max(1, Math.min(16, Number(a.capacity) || 1));
@@ -296,8 +301,73 @@
         el('div', { class: 'tags' }, skills.length ? skills.map((s) => el('span', { class: 'tag skill' }, s)) : el('span', { class: 'agent-meta' }, '未登记技能')),
         el('div', { class: 'agent-meta' }, `任务 ${active}/${capacity}`, meter, a.accepting ? '' : ' · 暂停接单', a.scope === 'read' ? ' · 只读' : ''),
         el('div', { class: 'agent-meta' }, '最近活动 ',
-          el('time', { datetime: a.last_seen ? new Date(a.last_seen * 1000).toISOString() : null, title: fmtTime(a.last_seen) }, ago(a.last_seen))));
+          el('time', { datetime: a.last_seen ? new Date(a.last_seen * 1000).toISOString() : null, title: fmtTime(a.last_seen) }, ago(a.last_seen))),
+        quotaBlock(a.quota));
     }));
+    startQuotaTimer();
+  }
+
+  // ---------- 额度与重置倒计时 ----------
+  // 倒计时只在浏览器本地每秒更新，不额外访问服务器；reset_at 到期显示“待刷新/待上报”，不会自动回填 100%。
+  const QUOTA_WINDOWS = [['five_hour', '5小时额度'], ['weekly', '周额度']];
+
+  function fmtCountdown(seconds) {
+    const s = Math.max(0, Math.floor(seconds));
+    const d = Math.floor(s / 86400);
+    const h = pad(Math.floor((s % 86400) / 3600));
+    const m = pad(Math.floor((s % 3600) / 60));
+    return d > 0 ? `${d}天 ${h}:${m}` : `${h}:${m}:${pad(s % 60)}`;
+  }
+
+  function quotaBlock(quota) {
+    const box = el('div', { class: 'quota' });
+    if (!quota || !quota.reported_at) {
+      for (const [, label] of QUOTA_WINDOWS) box.append(el('div', { class: 'agent-meta quota-line unreported' }, `${label}：未上报`));
+      return box;
+    }
+    if (Number.isFinite(quota.server_time)) quotaClock = quota.server_time * 1000 - Date.now();
+    for (const [name, label] of QUOTA_WINDOWS) {
+      const w = quota[name] || {};
+      if (w.state === 'unreported') {
+        box.append(el('div', { class: 'agent-meta quota-line unreported' }, `${label}：未上报`));
+        continue;
+      }
+      const pct = Number.isFinite(w.remaining_percent) ? `剩余 ${Number(w.remaining_percent.toFixed(1))}%` : '剩余 未知';
+      const line = el('div', { class: 'agent-meta quota-line ' + (Object.prototype.hasOwnProperty.call({ ok: 1, unknown: 1, reset_due: 1 }, w.state) ? w.state : 'unknown') }, `${label}：${pct}`);
+      const tail = el('span', { class: 'quota-reset' });
+      line.append(' · ', tail);
+      if (Number.isFinite(w.reset_at)) quotaTicks.push({ node: tail, resetAt: w.reset_at });
+      else tail.textContent = '重置时间未知';
+      box.append(line);
+    }
+    box.append(el('div', { class: 'agent-meta quota-line' }, '额度上报 ',
+      el('time', { datetime: new Date(quota.reported_at * 1000).toISOString(), title: fmtTime(quota.reported_at) }, ago(quota.reported_at)),
+      quota.stale ? el('span', { class: 'quota-stale' }, ' · 数据已过期') : null));
+    return box;
+  }
+
+  function tickQuota() {
+    quotaTicks = quotaTicks.filter((t) => t.node.isConnected);
+    const now = (Date.now() + quotaClock) / 1000;
+    for (const t of quotaTicks) {
+      const left = t.resetAt - now;
+      if (left > 0) t.node.textContent = '重置倒计时 ' + fmtCountdown(left);
+      else {
+        t.node.textContent = '待刷新/待上报';
+        t.node.parentNode.classList.add('reset_due');
+      }
+    }
+  }
+
+  function startQuotaTimer() {
+    tickQuota();
+    if (!quotaTimer) quotaTimer = setInterval(() => { if (!document.hidden) tickQuota(); }, 1000);
+  }
+
+  function stopQuotaTimer() {
+    clearInterval(quotaTimer);
+    quotaTimer = null;
+    quotaTicks = [];
   }
 
   // ---------- 帖子列表（最新在前） ----------
