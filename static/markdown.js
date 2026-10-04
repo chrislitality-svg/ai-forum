@@ -103,6 +103,8 @@
 
   // ---------- 块级解析（纯数据 AST） ----------
   const RE_FENCE = /^```([^\n`]*)$/;
+  // 嵌套深度上限：防畸形输入栈溢出；超限安全退化为文本
+  const MAX_DEPTH = 20;
   const RE_HR = /^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/;
   const RE_HEADING = /^(#{1,6})\s+(.*)$/;
   const RE_QUOTE = /^>\s?(.*)$/;
@@ -123,7 +125,7 @@
     return s.split('|').map((c) => c.trim());
   }
 
-  function parseMarkdown(text) {
+  function parseMarkdown(text, depth = 0) {
     const lines = String(text).replace(/\r\n?/g, '\n').split('\n');
     const blocks = [];
     let i = 0;
@@ -148,11 +150,15 @@
       const heading = line.match(RE_HEADING);
       if (heading) { blocks.push({ type: 'heading', level: heading[1].length, text: heading[2].trim() }); i += 1; continue; }
 
-      // 引用（连续行，递归解析内部）
+      // 引用（连续行，递归解析内部；深度超限退化为文本，防栈溢出）
       if (RE_QUOTE.test(line)) {
         const inner = [];
         while (i < lines.length && RE_QUOTE.test(lines[i])) { inner.push(lines[i].match(RE_QUOTE)[1]); i += 1; }
-        blocks.push({ type: 'quote', blocks: parseMarkdown(inner.join('\n')) });
+        if (depth >= MAX_DEPTH) {
+          blocks.push({ type: 'paragraph', text: inner.join('\n') });
+        } else {
+          blocks.push({ type: 'quote', blocks: parseMarkdown(inner.join('\n'), depth + 1) });
+        }
         continue;
       }
 
@@ -173,11 +179,17 @@
         continue;
       }
 
-      // 列表（有序/无序，按缩进嵌套）
+      // 列表（有序/无序，按实际起始缩进嵌套；无进展时按段落保底，保证循环必前进）
       if (RE_ULIST.test(line) || RE_OLIST.test(line)) {
-        const { list, next } = parseList(lines, i, 0);
-        blocks.push(list);
-        i = next;
+        const m = line.match(RE_ULIST) || line.match(RE_OLIST);
+        const { list, next } = parseList(lines, i, m[1].length, 0);
+        if (next === i || !list.items.length) {
+          blocks.push({ type: 'paragraph', text: line });
+          i += 1;
+        } else {
+          blocks.push(list);
+          i = next;
+        }
         continue;
       }
 
@@ -196,7 +208,7 @@
     return blocks;
   }
 
-  function parseList(lines, i, indent) {
+  function parseList(lines, i, indent, depth) {
     const ordered = RE_OLIST.test(lines[i]) && (lines[i].match(RE_OLIST)[1].length === indent);
     const items = [];
     while (i < lines.length) {
@@ -208,13 +220,13 @@
       if ((ordered && !ol) || (!ordered && !ul)) break;
       const item = { text: m[ordered ? 3 : 2], children: [] };
       i += 1;
-      // 嵌套：下一行缩进更深且仍是列表
-      if (i < lines.length) {
+      // 嵌套：下一行缩进更深且仍是列表；深度超限不再嵌套
+      if (i < lines.length && depth < MAX_DEPTH) {
         const nu = lines[i].match(RE_ULIST);
         const no = lines[i].match(RE_OLIST);
         const nm = nu || no;
         if (nm && nm[1].length > indent) {
-          const sub = parseList(lines, i, nm[1].length);
+          const sub = parseList(lines, i, nm[1].length, depth + 1);
           item.children.push(sub.list);
           i = sub.next;
         }
@@ -312,7 +324,12 @@
   // ---------- 阅读 / 原文 切换 ----------
   function richView(text, el) {
     const rendered = el('div', { class: 'rich md' });
-    renderBlocks(parseMarkdown(text), el, rendered);
+    try {
+      renderBlocks(parseMarkdown(text), el, rendered);
+    } catch (_) {
+      // 解析或渲染异常绝不能影响整帖打开：退化为完整文本
+      rendered.replaceChildren(el('p', null, text));
+    }
     const raw = el('pre', { class: 'md-raw', hidden: true }, text);
     const btnRender = el('button', { type: 'button', class: 'md-toggle active', 'aria-pressed': 'true' }, '阅读');
     const btnRaw = el('button', { type: 'button', class: 'md-toggle', 'aria-pressed': 'false' }, '原文');

@@ -131,3 +131,52 @@ test('畸形输入不抛异常', () => {
     MD.inlineTokens(src);
   }
 });
+
+// ---------- #23 审查回归:缩进起始列表 / 深嵌套 ----------
+test('回归:根列表带 1/2/3 空格缩进均正常解析且循环必终止', () => {
+  for (const src of [' - item', '  - item', '   - item', '  1. item', '  + item']) {
+    const b = MD.parseMarkdown(src);
+    assert.equal(b[0].type, 'list', JSON.stringify(src));
+    assert.equal(b[0].items.length, 1);
+  }
+});
+
+test('回归:制表符缩进列表', () => {
+  const b = MD.parseMarkdown('\t- item\n\t- item2');
+  assert.equal(b[0].type, 'list');
+  assert.equal(b[0].items.length, 2);
+});
+
+test('回归:引用内带缩进列表', () => {
+  const b = MD.parseMarkdown('>   - item\n>   - item2');
+  assert.equal(b[0].type, 'quote');
+  assert.equal(b[0].blocks[0].type, 'list');
+  assert.equal(b[0].blocks[0].items.length, 2);
+});
+
+test('回归:混合有序/无序列表各自成块且均终止', () => {
+  const b = MD.parseMarkdown('- a\n- b\n1. x\n2. y\n- c');
+  assert.deepEqual(types(b), ['list', 'list', 'list']);
+  assert.equal(b[0].ordered, false);
+  assert.equal(b[1].ordered, true);
+  assert.equal(b[2].ordered, false);
+});
+
+test('回归:7000 深引用不栈溢出,安全退化', () => {
+  const b = MD.parseMarkdown('>'.repeat(7000) + ' x');
+  assert.equal(b.length, 1);
+  assert.equal(b[0].type, 'quote'); // 顶层仍是引用,超限内部退化为文本
+});
+
+test('回归:超深列表缩进不栈溢出且必终止', () => {
+  const src = Array.from({ length: 2000 }, (_, i) => ' '.repeat(i) + '- x').join('\n');
+  const b = MD.parseMarkdown(src);
+  assert.ok(b.length >= 1);
+});
+
+test('回归:深度超限后内容仍以文本保留,不丢数据', () => {
+  const deep = '>'.repeat(30) + ' 保留我';
+  const b = MD.parseMarkdown(deep);
+  const flat = JSON.stringify(b);
+  assert.ok(flat.includes('保留我'));
+});
