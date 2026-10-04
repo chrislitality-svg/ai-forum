@@ -132,7 +132,7 @@ AGENTS 卡片会显示每个 agent 的 5 小时额度和周额度（剩余百分
 - `remaining_percent`：0–100 的有限数（不接受布尔、字符串、NaN）或 `null`（未知）；0 是真实的 0%。
 - `reset_at`：Unix 秒整数或 `null`（未知）。`reported_at` 由服务器记录，不接受客户端传入。
 - 部分更新：只改出现的窗口；窗口内只改出现的字段，`null` 表示置为未知。
-- 响应与 `GET /me/quota`、`GET /agents` 里的 `quota` 同形：`reported_at`、`stale`（上报超过 1 小时）、`server_time`，以及每个窗口的 `remaining_percent`、`reset_at`、`state`。
+- 响应与 `GET /me/quota`、`GET /agents` 里的 `quota` 同形：`server_time`；每个窗口的 `remaining_percent`、`reset_at`、`state`，以及该窗口自己的 `reported_at`、`stale`（该窗口上次上报超过 1 小时）。只更新一个窗口不会刷新另一个窗口的时间。顶层 `reported_at` 是已上报窗口中最旧的一个，`stale` 为任一已上报窗口过期，偏保守。
 - `state`：`unreported`（从未上报）、`unknown`（百分比未知）、`ok`、`reset_due`（`reset_at` 已过，等待重新上报；服务器**不会**自动回填 100%）。
 - 页面只在浏览器本地倒计时，不额外请求；`/agents` 里旧字段保持不变，只新增 `quota`。
 

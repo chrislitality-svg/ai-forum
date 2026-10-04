@@ -91,7 +91,7 @@ def unread_filter():
 
 
 def percent(value):
-    if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 100):
+    if value is not None and (type(value) not in (int, float) or not 0 <= value <= 100):  # NaN fails the range check
         fail(400, 'invalid_field', 'remaining_percent: expected a finite number between 0 and 100, or null')
     return value
 
@@ -105,18 +105,23 @@ def reset_time(value):
 def quota_summary(row, now):
     """Per-window state: unreported (never reported), unknown (no percentage), reset_due (reset_at passed), ok.
     Values are never refilled on reset: the agent must report again. stale = last report is old."""
-    reported = row['quota_reported_at']
-    result = {'reported_at': reported, 'stale': reported is not None and now - reported > QUOTA_STALE_SECONDS,
-              'server_time': now}
+    result = {'server_time': now}
+    times = []
     for name, prefix in QUOTA_WINDOWS.items():
-        pct, reset = row[prefix + '_pct'], row[prefix + '_reset']
-        if reported is None:
+        pct, reset, at = row[prefix + '_pct'], row[prefix + '_reset'], row[prefix + '_at']
+        if at is None:
             state = 'unreported'
         elif reset is not None and reset <= now:
             state = 'reset_due'
         else:
             state = 'unknown' if pct is None else 'ok'
-        result[name] = {'remaining_percent': pct, 'reset_at': reset, 'state': state}
+        result[name] = {'remaining_percent': pct, 'reset_at': reset, 'state': state, 'reported_at': at,
+                        'stale': at is not None and now - at > QUOTA_STALE_SECONDS}
+        if at is not None:
+            times.append(at)
+    # Top level is conservative: oldest window report, stale if any reported window is stale.
+    result['reported_at'] = min(times) if times else None
+    result['stale'] = any(result[name]['stale'] for name in QUOTA_WINDOWS)
     return result
 
 
@@ -307,14 +312,14 @@ def create_app(database=None):
     def agents():
         now = int(time.time())
         rows = g.db.execute('SELECT a.id,a.skills,a.capacity,a.accepting,a.last_seen,a.scope,'
-                            'a.quota_5h_pct,a.quota_5h_reset,a.quota_week_pct,a.quota_week_reset,a.quota_reported_at,'
+                            'a.quota_5h_pct,a.quota_5h_reset,a.quota_week_pct,a.quota_week_reset,a.quota_5h_at,a.quota_week_at,'
                             '(SELECT count(*) FROM posts p WHERE p.claimed_by=a.id '
                             'AND p.state=\'claimed\' AND p.lease_until>?) AS active_tasks FROM agents a', (now,))
         result = []
         for row in rows:
             item = dict(row)
             item['quota'] = quota_summary(row, now)
-            for column in ('quota_5h_pct', 'quota_5h_reset', 'quota_week_pct', 'quota_week_reset', 'quota_reported_at'):
+            for column in ('quota_5h_pct', 'quota_5h_reset', 'quota_week_pct', 'quota_week_reset', 'quota_5h_at', 'quota_week_at'):
                 del item[column]
             item['skills'] = json.loads(item['skills'])
             item['online'] = item['last_seen'] > now - 300
@@ -365,6 +370,9 @@ def create_app(database=None):
             if 'reset_at' in window:
                 values[prefix + '_reset'] = reset_time(window['reset_at'])
         now = int(time.time())
+        for name, prefix in QUOTA_WINDOWS.items():
+            if name in data:
+                values[prefix + '_at'] = now
         values['quota_reported_at'] = now
         g.db.execute('UPDATE agents SET ' + ','.join(c + '=?' for c in values) + ',last_seen=? WHERE id=?',
                      list(values.values()) + [now, g.agent['id']])

@@ -489,7 +489,8 @@ class ForumTests(unittest.TestCase):
         q = self.req('GET', '/me/quota').json
         self.assertIsNone(q['reported_at'])
         self.assertFalse(q['stale'])
-        self.assertEqual(q['five_hour'], {'remaining_percent': None, 'reset_at': None, 'state': 'unreported'})
+        self.assertEqual(q['five_hour'], {'remaining_percent': None, 'reset_at': None, 'state': 'unreported',
+                                          'reported_at': None, 'stale': False})
         self.assertEqual(self.req('GET', '/me').json['quota']['weekly']['state'], 'unreported')
         agents = self.req('GET', '/agents').json['items']
         for a in agents:
@@ -504,11 +505,13 @@ class ForumTests(unittest.TestCase):
         r = self.req('POST', '/me/quota', {'five_hour': {'remaining_percent': 0, 'reset_at': now + 600},
                                            'weekly': {'remaining_percent': 72.5, 'reset_at': now + 86400}}, agent='friend-agent')
         self.assertEqual(r.status_code, 200, r.json)
-        self.assertEqual(r.json['five_hour'], {'remaining_percent': 0, 'reset_at': now + 600, 'state': 'ok'})
+        self.assertEqual({k: r.json['five_hour'][k] for k in ('remaining_percent', 'reset_at', 'state')},
+                         {'remaining_percent': 0, 'reset_at': now + 600, 'state': 'ok'})
         self.assertEqual(r.json['weekly']['remaining_percent'], 72.5)
         # partial: only weekly percent changes, everything else kept; null = unknown
         r = self.req('POST', '/me/quota', {'weekly': {'remaining_percent': None}}, agent='friend-agent').json
-        self.assertEqual(r['weekly'], {'remaining_percent': None, 'reset_at': now + 86400, 'state': 'unknown'})
+        self.assertEqual({k: r['weekly'][k] for k in ('remaining_percent', 'reset_at', 'state')},
+                         {'remaining_percent': None, 'reset_at': now + 86400, 'state': 'unknown'})
         self.assertEqual(r['five_hour']['remaining_percent'], 0)
         # other agents are untouched and visible summary is attached to /agents
         self.assertEqual(self.req('GET', '/me/quota', agent='local-agent').json['five_hour']['state'], 'unreported')
@@ -528,18 +531,39 @@ class ForumTests(unittest.TestCase):
             response = self.client.post(API + '/me/quota', data='{"weekly":{"remaining_percent":%s}}' % raw,
                                         content_type='application/json', headers={'Authorization': 'Bearer ' + self.keys['local-agent']})
             self.assertEqual(response.status_code, 400, raw)
+        for raw in ('1' + '0' * 1000, '-1' + '0' * 1000):  # huge ints must be rejected, not crash float conversion
+            response = self.client.post(API + '/me/quota', data='{"weekly":{"remaining_percent":%s}}' % raw,
+                                        content_type='application/json', headers={'Authorization': 'Bearer ' + self.keys['local-agent']})
+            self.assertEqual(response.status_code, 400, raw[:5])
         self.assertEqual(self.req('GET', '/me/quota').json['five_hour']['state'], 'unreported')
+        self.assertEqual(self.req('GET', '/me/quota').json['weekly']['state'], 'unreported')
 
     def test_quota_reset_due_stale_and_not_refilled(self):
         import time
         now = int(time.time())
         self.req('POST', '/me/quota', {'five_hour': {'remaining_percent': 3, 'reset_at': now + 5}})
         db = connect(self.path)
-        db.execute('UPDATE agents SET quota_5h_reset=?,quota_reported_at=? WHERE id=?', (now - 1, now - 7200, 'local-agent'))
+        db.execute('UPDATE agents SET quota_5h_reset=?,quota_5h_at=? WHERE id=?', (now - 1, now - 7200, 'local-agent'))
         db.close()
         q = self.req('GET', '/me/quota').json
-        self.assertEqual(q['five_hour'], {'remaining_percent': 3, 'reset_at': now - 1, 'state': 'reset_due'})
+        self.assertEqual(q['five_hour']['state'], 'reset_due')
+        self.assertEqual(q['five_hour']['remaining_percent'], 3)
         self.assertTrue(q['stale'])
+
+    def test_quota_partial_update_does_not_refresh_other_window(self):
+        import time
+        now = int(time.time())
+        self.req('POST', '/me/quota', {'five_hour': {'remaining_percent': 50}, 'weekly': {'remaining_percent': 15}})
+        db = connect(self.path)
+        db.execute('UPDATE agents SET quota_5h_at=?,quota_week_at=? WHERE id=?', (now - 7200, now - 7200, 'local-agent'))
+        db.close()
+        q = self.req('POST', '/me/quota', {'five_hour': {'remaining_percent': 40}}).json
+        self.assertFalse(q['five_hour']['stale'])
+        self.assertTrue(q['weekly']['stale'])
+        self.assertEqual(q['weekly']['reported_at'], now - 7200)
+        self.assertEqual(q['weekly']['remaining_percent'], 15)
+        self.assertTrue(q['stale'])
+        self.assertEqual(q['reported_at'], now - 7200)
 
     def test_quota_idempotent_and_persistent_and_legacy_db(self):
         import sqlite3

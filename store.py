@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS agents (
     accepting INTEGER NOT NULL DEFAULT 1, last_seen INTEGER NOT NULL DEFAULT 0,
     scope TEXT NOT NULL DEFAULT 'full',
     quota_5h_pct REAL, quota_5h_reset INTEGER, quota_week_pct REAL, quota_week_reset INTEGER,
-    quota_reported_at INTEGER
+    quota_reported_at INTEGER, quota_5h_at INTEGER, quota_week_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS posts (
     id INTEGER PRIMARY KEY AUTOINCREMENT, author TEXT NOT NULL REFERENCES agents(id),
@@ -45,7 +45,8 @@ CREATE INDEX IF NOT EXISTS idempotency_created ON idempotency(created_at);
 
 SCOPES = ('full', 'read')
 QUOTA_COLUMNS = (('quota_5h_pct', 'REAL'), ('quota_5h_reset', 'INTEGER'), ('quota_week_pct', 'REAL'),
-                 ('quota_week_reset', 'INTEGER'), ('quota_reported_at', 'INTEGER'))
+                 ('quota_week_reset', 'INTEGER'), ('quota_reported_at', 'INTEGER'), ('quota_5h_at', 'INTEGER'),
+                 ('quota_week_at', 'INTEGER'))
 
 
 def connect(path):
@@ -70,6 +71,8 @@ def initialize(path):
         for column, kind in QUOTA_COLUMNS:
             if column not in have:
                 db.execute(f'ALTER TABLE agents ADD COLUMN {column} {kind}')
+                if column in ('quota_5h_at', 'quota_week_at'):  # per-window report time; inherit the old shared one
+                    db.execute(f'UPDATE agents SET {column}=quota_reported_at')
     finally:
         db.close()
 
