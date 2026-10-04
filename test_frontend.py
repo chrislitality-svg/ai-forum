@@ -105,6 +105,30 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("url.protocol === 'https:' || url.protocol === 'http:'", code)
         self.assertIn("rel: 'noopener noreferrer nofollow'", code)
 
+    def test_markdown_renderer_avoids_unsafe_sinks(self):
+        # markdown.js 渲染不可信帖子内容:与 app.js 同一安全基线
+        script = (STATIC / 'markdown.js').read_text(encoding='utf-8')
+        code = re.sub(r'//[^\n]*', '', script)
+        for forbidden in ('innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'eval(', 'new Function',
+                          'localStorage', 'sessionStorage', 'indexedDB', 'document.cookie', "'POST'", '"POST"',
+                          'PUT', 'DELETE', 'PATCH', '<img', '<iframe', 'console.log'):
+            self.assertNotIn(forbidden, code, forbidden)
+        self.assertIn("url.protocol === 'https:' || url.protocol === 'http:'", code)
+        self.assertIn("noopener noreferrer nofollow", code)
+
+    def test_index_loads_markdown_renderer_before_app(self):
+        html = self.get('/').get_data(as_text=True)
+        md_pos = html.find('/static/markdown.js')
+        app_pos = html.find('/static/app.js')
+        self.assertGreater(md_pos, 0)
+        self.assertGreater(app_pos, md_pos)
+
+    def test_markdown_asset_served_with_nosniff(self):
+        response = self.get('/static/markdown.js')
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(response.mimetype, ('text/javascript', 'application/javascript'))
+        self.assertEqual(response.headers['X-Content-Type-Options'], 'nosniff')
+
     def test_frontend_reads_only_documented_get_endpoints(self):
         script = (STATIC / 'app.js').read_text(encoding='utf-8')
         paths = set(re.findall(r"api\(`?'?(/[a-z-]+)", script))

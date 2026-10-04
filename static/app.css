@@ -216,6 +216,37 @@ input[type=password]:focus { border-color: var(--green); outline: none; box-shad
 .codeblock .lang { display: block; padding: 2px 10px; font-size: 11px; color: var(--muted); border-bottom: 1px solid var(--line); }
 .codeblock pre { margin: 0; padding: 10px 12px; overflow-x: auto; white-space: pre; font-size: 13px; line-height: 1.55; color: #cfe9d8; tab-size: 4; }
 
+/* ---------- Markdown 阅读器 ---------- */
+.mdview { position: relative; }
+.md-toolbar { display: flex; gap: 4px; justify-content: flex-end; margin: 2px 0 6px; }
+.md-toggle { font-size: 11px; padding: 1px 10px; border: 1px solid var(--line-hi); background: none; color: var(--muted); cursor: pointer; }
+.md-toggle:hover { color: var(--green); border-color: var(--green); }
+.md-toggle.active { color: var(--green); border-color: var(--green); background: rgba(63, 217, 142, .08); }
+.rich.md { white-space: normal; }
+.rich.md p { margin: 8px 0; line-height: 1.65; }
+.rich.md p:first-child { margin-top: 0; }
+.md-raw { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; margin: 0; font: inherit; font-size: 13px; color: var(--text); }
+.md-h { margin: 14px 0 6px; line-height: 1.4; color: var(--text); }
+.md-h:first-child { margin-top: 0; }
+.md-h1 { font-size: 21px; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+.md-h2 { font-size: 18px; border-bottom: 1px dashed var(--line); padding-bottom: 3px; }
+.md-h3 { font-size: 16px; }
+.md-h4, .md-h5, .md-h6 { font-size: 14px; color: var(--muted); }
+.md-list { margin: 8px 0; padding-left: 22px; }
+.md-list .md-list { margin: 2px 0; }
+.md-list li { margin: 3px 0; line-height: 1.6; }
+.md-quote { margin: 8px 0; padding: 4px 12px; border-left: 3px solid var(--line-hi); background: #080d0a; color: var(--muted); }
+.md-quote p { margin: 4px 0; }
+.rich.md hr { border: 0; border-top: 1px solid var(--line); margin: 14px 0; }
+.md-table-scroll { overflow-x: auto; margin: 10px 0; border: 1px solid var(--line-hi); }
+.md-table { border-collapse: collapse; font-size: 13px; min-width: 100%; }
+.md-table th, .md-table td { padding: 5px 12px; border: 1px solid var(--line); text-align: left; }
+.md-table th { background: #0a120d; color: var(--green); font-weight: 600; }
+.md-table td { color: var(--text); }
+.md-table tr:nth-child(even) td { background: rgba(255, 255, 255, .02); }
+.md-table .md-ac { text-align: center; }
+.md-table .md-ar { text-align: right; }
+
 .section-h { margin: 22px 0 10px; font-size: 13px; letter-spacing: .12em; color: var(--green); border-bottom: 1px solid var(--line); padding-bottom: 4px; display: flex; gap: 8px; align-items: baseline; }
 .replies { list-style: none; margin: 0; padding: 0; }
 .reply { margin: 0 0 12px; padding: 10px 12px; background: #0a100c; border-left: 4px solid var(--line-hi); }

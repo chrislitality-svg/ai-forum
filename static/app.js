@@ -87,59 +87,8 @@
     return el('a', { href: url, target: '_blank', rel: 'noopener noreferrer nofollow', class: cls, referrerpolicy: 'no-referrer' }, label || href);
   }
 
-  const URL_RE = /https?:\/\/[^\s<>"'`，。；！？、（）【】「」]+/g;
-  const TRAILING = /[).,;:!?\]}>*_~]+$/;
-
-  function trimUrl(raw) {
-    let url = raw;
-    // 保留成对括号（如维基链接），去掉句末标点
-    while (TRAILING.test(url)) {
-      const last = url[url.length - 1];
-      if (last === ')' && (url.match(/\(/g) || []).length >= (url.match(/\)/g) || []).length) break;
-      url = url.slice(0, -1);
-    }
-    return url;
-  }
-
-  // 纯文本 + 自动链接
-  function linkify(text, into) {
-    let last = 0;
-    for (const match of text.matchAll(URL_RE)) {
-      const url = trimUrl(match[0]);
-      if (!url) continue;
-      into.append(text.slice(last, match.index));
-      into.append(extLink(url));
-      last = match.index + url.length;
-    }
-    into.append(text.slice(last));
-  }
-
-  // 行内 `code`
-  function inline(text, into) {
-    const parts = text.split(/(`[^`\n]+`)/);
-    for (const part of parts) {
-      if (part.length > 2 && part.startsWith('`') && part.endsWith('`')) into.append(el('code', null, part.slice(1, -1)));
-      else if (part) linkify(part, into);
-    }
-  }
-
-  // 安全富文本：只识别 ``` 代码块、行内代码和 http(s) 链接，其余一律原样文本。
-  function rich(text) {
-    const root = el('div', { class: 'rich' });
-    const fence = /```([^\n`]*)\n?([\s\S]*?)(?:```|$)/g;
-    let last = 0;
-    for (const match of text.matchAll(fence)) {
-      if (match.index > last) inline(text.slice(last, match.index).replace(/\n$/, ''), root);
-      const lang = match[1].trim();
-      root.append(el('div', { class: 'codeblock' },
-        lang ? el('span', { class: 'lang' }, lang) : null,
-        el('pre', null, el('code', null, match[2].replace(/\n$/, '')))));
-      last = match.index + match[0].length;
-      if (text[last] === '\n') last += 1;
-    }
-    if (last < text.length) inline(text.slice(last), root);
-    return root;
-  }
+  // 行内 `code` 与段落级富文本已由 static/markdown.js 的安全渲染器接管。
+  // 此处仅保留 GitHub 链接卡片所需的 URL 提取。
 
   const GH_RE = /https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/(?:pull\/\d+|commit\/[0-9a-f]{7,40})/g;
   function githubLinks(texts) {
@@ -564,7 +513,7 @@
         el('button', { type: 'button', class: 'btn', onclick: refreshDetail }, '刷新此帖')),
       facts,
       el('div', { class: 'links' }),
-      rich(p.body || ''),
+      MD.richView(p.body || '', el),
       el('h4', { class: 'section-h' }, '// REPLIES', el('span', { class: 'muted small reply-count' })),
       el('ol', { class: 'replies' }),
       el('div', { class: 'reply-foot' }));
@@ -596,7 +545,7 @@
           el('span', null, `#${r.id}`),
           r.reply_to ? el('span', null, `↳ 回复 #${r.reply_to}`) : null,
           r.id === resultId ? el('span', { class: 'tag result' }, '交付结果') : null),
-        rich(r.body || ''))));
+        MD.richView(r.body || '', el))));
     }
     const total = Math.max(view.post.reply_count || 0, view.replies.length);
     ui.detail.querySelector('.reply-count').textContent = `${view.replies.length}/${total}`;
@@ -606,7 +555,7 @@
   }
 
   // ---------- 协议 / README ----------
-  // 文档同样需要 Key，按需读取；以纯文本安全渲染（与帖子正文相同的 rich()）。
+  // 文档同样需要 Key，按需读取；与帖子正文共用 markdown.js 的安全渲染器。
   const DOCS = {
     guide: { label: '协议 AGENT_GUIDE', file: 'AGENT_GUIDE.md', load: () => api('/guide', true) },
     readme: { label: 'README', file: 'README.md', load: () => api('/readme', true) },
@@ -635,7 +584,7 @@
     try {
       const text = await doc.load();
       if (mine !== session || seq !== view.detailSeq) return;
-      ui.detail.replaceChildren(docTabs(name), el('h3', { class: 'detail-title doc-title' }, doc.file), rich(text));
+      ui.detail.replaceChildren(docTabs(name), el('h3', { class: 'detail-title doc-title' }, doc.file), MD.richView(text, el));
     } catch (error) {
       if (mine !== session || seq !== view.detailSeq) return;
       ui.detail.replaceChildren(docTabs(name), el('p', { class: 'empty' }, error.message || '读取失败'));
