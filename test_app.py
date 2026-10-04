@@ -251,7 +251,7 @@ class ForumTests(unittest.TestCase):
         reader = self.reader()
         pid = self.task()
         writes = [('/posts', {'title': 't', 'body': 'b'}), (f'/posts/{pid}/replies', {'body': 'x'}),
-                  ('/me/heartbeat', {}), (f'/posts/{pid}/read', {'through_event_id': 1}),
+                  ('/me/heartbeat', {}), ('/me/quota', {'weekly': {'remaining_percent': 1}}), (f'/posts/{pid}/read', {'through_event_id': 1}),
                   ('/tasks/claim-next', {}), (f'/tasks/{pid}/claim', {}),
                   (f'/tasks/{pid}/heartbeat', {'lease_token': 'x'}),
                   (f'/tasks/{pid}/complete', {'lease_token': 'x', 'result': 'r'}),
@@ -271,7 +271,7 @@ class ForumTests(unittest.TestCase):
         finally:
             db.close()
         for path in ('/me', '/agents', '/posts', '/post-ids', f'/posts/{pid}', f'/posts/{pid}/replies',
-                     '/inbox', '/me/claims', '/guide', '/readme', '/posts?before_id=100'):
+                     '/inbox', '/me/claims', '/me/quota', '/guide', '/readme', '/posts?before_id=100'):
             self.assertEqual(self.req('GET', path, agent=reader).status_code, 200, path)
 
     def test_scope_reported_and_full_keys_unchanged(self):
@@ -483,6 +483,83 @@ class ForumTests(unittest.TestCase):
         finally:
             server.shutdown()
             thread.join(5)
+
+    # ---------- 额度上报 ----------
+    def test_quota_default_unreported_and_agents_compat(self):
+        q = self.req('GET', '/me/quota').json
+        self.assertIsNone(q['reported_at'])
+        self.assertFalse(q['stale'])
+        self.assertEqual(q['five_hour'], {'remaining_percent': None, 'reset_at': None, 'state': 'unreported'})
+        self.assertEqual(self.req('GET', '/me').json['quota']['weekly']['state'], 'unreported')
+        agents = self.req('GET', '/agents').json['items']
+        for a in agents:
+            self.assertEqual(a['quota']['five_hour']['state'], 'unreported')
+            self.assertTrue({'id', 'skills', 'capacity', 'accepting', 'last_seen', 'scope', 'active_tasks', 'online'} <= set(a))
+            self.assertFalse([k for k in a if k.startswith('quota_')])
+        self.assertEqual(self.client.get(API + '/me/quota').status_code, 401)
+
+    def test_quota_report_self_only_partial_and_zero(self):
+        import time
+        now = int(time.time())
+        r = self.req('POST', '/me/quota', {'five_hour': {'remaining_percent': 0, 'reset_at': now + 600},
+                                           'weekly': {'remaining_percent': 72.5, 'reset_at': now + 86400}}, agent='friend-agent')
+        self.assertEqual(r.status_code, 200, r.json)
+        self.assertEqual(r.json['five_hour'], {'remaining_percent': 0, 'reset_at': now + 600, 'state': 'ok'})
+        self.assertEqual(r.json['weekly']['remaining_percent'], 72.5)
+        # partial: only weekly percent changes, everything else kept; null = unknown
+        r = self.req('POST', '/me/quota', {'weekly': {'remaining_percent': None}}, agent='friend-agent').json
+        self.assertEqual(r['weekly'], {'remaining_percent': None, 'reset_at': now + 86400, 'state': 'unknown'})
+        self.assertEqual(r['five_hour']['remaining_percent'], 0)
+        # other agents are untouched and visible summary is attached to /agents
+        self.assertEqual(self.req('GET', '/me/quota', agent='local-agent').json['five_hour']['state'], 'unreported')
+        mine = [a for a in self.req('GET', '/agents').json['items'] if a['id'] == 'friend-agent'][0]
+        self.assertEqual(mine['quota']['five_hour']['remaining_percent'], 0)
+
+    def test_quota_validation(self):
+        bad = [{}, [], {'agent_id': 'x', 'weekly': {'remaining_percent': 5}}, {'monthly': {'remaining_percent': 5}},
+               {'weekly': {}}, {'weekly': 5}, {'weekly': {'foo': 1}},
+               {'weekly': {'remaining_percent': 101}}, {'weekly': {'remaining_percent': -1}},
+               {'weekly': {'remaining_percent': True}}, {'weekly': {'remaining_percent': '5'}},
+               {'weekly': {'reset_at': 0}}, {'weekly': {'reset_at': 1.5}}, {'weekly': {'reset_at': True}},
+               {'weekly': {'reset_at': 99999999999}}]
+        for data in bad:
+            self.assertEqual(self.req('POST', '/me/quota', data).status_code, 400, data)
+        for raw in ('NaN', 'Infinity'):
+            response = self.client.post(API + '/me/quota', data='{"weekly":{"remaining_percent":%s}}' % raw,
+                                        content_type='application/json', headers={'Authorization': 'Bearer ' + self.keys['local-agent']})
+            self.assertEqual(response.status_code, 400, raw)
+        self.assertEqual(self.req('GET', '/me/quota').json['five_hour']['state'], 'unreported')
+
+    def test_quota_reset_due_stale_and_not_refilled(self):
+        import time
+        now = int(time.time())
+        self.req('POST', '/me/quota', {'five_hour': {'remaining_percent': 3, 'reset_at': now + 5}})
+        db = connect(self.path)
+        db.execute('UPDATE agents SET quota_5h_reset=?,quota_reported_at=? WHERE id=?', (now - 1, now - 7200, 'local-agent'))
+        db.close()
+        q = self.req('GET', '/me/quota').json
+        self.assertEqual(q['five_hour'], {'remaining_percent': 3, 'reset_at': now - 1, 'state': 'reset_due'})
+        self.assertTrue(q['stale'])
+
+    def test_quota_idempotent_and_persistent_and_legacy_db(self):
+        import sqlite3
+        r1 = self.req('POST', '/me/quota', {'weekly': {'remaining_percent': 40}}, idem='q1')
+        r2 = self.req('POST', '/me/quota', {'weekly': {'remaining_percent': 40}}, idem='q1')
+        self.assertEqual(r1.json, r2.json)
+        self.assertEqual(self.req('POST', '/me/quota', {'weekly': {'remaining_percent': 41}}, idem='q1').status_code, 409)
+        restarted = create_app(self.path).test_client()
+        self.assertEqual(self.req('GET', '/me/quota', client=restarted).json['weekly']['remaining_percent'], 40)
+        legacy = os.path.join(self.temp.name, 'legacy.db')
+        db = sqlite3.connect(legacy)
+        db.execute("CREATE TABLE agents (id TEXT PRIMARY KEY, key_hash TEXT NOT NULL UNIQUE, skills TEXT NOT NULL DEFAULT '[]', "
+                   "capacity INTEGER NOT NULL DEFAULT 1, accepting INTEGER NOT NULL DEFAULT 1, last_seen INTEGER NOT NULL DEFAULT 0, "
+                   "scope TEXT NOT NULL DEFAULT 'full')")
+        db.commit()
+        db.close()
+        create_app(legacy)  # upgrade adds the quota columns in place
+        key = provision(legacy, 'old-agent')
+        response = create_app(legacy).test_client().get(API + '/me/quota', headers={'Authorization': 'Bearer ' + key})
+        self.assertEqual(response.json['five_hour']['state'], 'unreported')
 
 if __name__ == '__main__':
     unittest.main()

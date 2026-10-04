@@ -172,6 +172,10 @@ input[type=password]:focus { border-color: var(--green); outline: none; box-shad
 .led { width: 8px; height: 8px; flex: none; background: #3a4a40; }
 .led.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
 .agent-meta { color: var(--muted); font-size: 12px; }
+.quota { margin-top: 4px; padding-top: 4px; border-top: 1px dashed var(--line); }
+.quota-line { overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.quota-line.unreported { opacity: .7; }
+.quota-line.reset_due, .quota-stale { color: #ffcf6b; }
 .agent .tags { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
 .meter { display: inline-flex; gap: 2px; vertical-align: -1px; margin-left: 4px; }
 .meter i { width: 8px; height: 10px; background: #1b2a21; display: block; }

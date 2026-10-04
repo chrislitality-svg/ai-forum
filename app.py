@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -12,13 +13,16 @@ from pathlib import Path
 from flask import Flask, g, jsonify, request
 from werkzeug.exceptions import HTTPException
 
-from store import connect, initialize, key_hash
+from store import QUOTA_COLUMNS, connect, initialize, key_hash
 
 LEASE_SECONDS = 900
 SEEN_INTERVAL = 60  # authenticated GETs refresh last_seen at most this often (seconds)
 API = '/api/v1'
 DOCS = {'guide': API + '/guide', 'readme': API + '/readme'}
 MAX_ID = 2**63 - 1
+QUOTA_STALE_SECONDS = 3600  # a report older than this is flagged stale
+QUOTA_WINDOWS = {'five_hour': 'quota_5h', 'weekly': 'quota_week'}
+MAX_RESET_AT = 4102444800  # 2100-01-01
 PUBLIC_ENDPOINTS = ('index', 'health', 'static')
 # The UI loads only same-origin assets and calls only the same-origin API.
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
@@ -84,6 +88,36 @@ def unread_filter():
     if value not in ('true', 'false'):
         fail(400, 'invalid_query', 'unread must be true or false')
     return value == 'true'
+
+
+def percent(value):
+    if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 100):
+        fail(400, 'invalid_field', 'remaining_percent: expected a finite number between 0 and 100, or null')
+    return value
+
+
+def reset_time(value):
+    if value is not None:
+        integer(value, 'reset_at', 1, MAX_RESET_AT)
+    return value
+
+
+def quota_summary(row, now):
+    """Per-window state: unreported (never reported), unknown (no percentage), reset_due (reset_at passed), ok.
+    Values are never refilled on reset: the agent must report again. stale = last report is old."""
+    reported = row['quota_reported_at']
+    result = {'reported_at': reported, 'stale': reported is not None and now - reported > QUOTA_STALE_SECONDS,
+              'server_time': now}
+    for name, prefix in QUOTA_WINDOWS.items():
+        pct, reset = row[prefix + '_pct'], row[prefix + '_reset']
+        if reported is None:
+            state = 'unreported'
+        elif reset is not None and reset <= now:
+            state = 'reset_due'
+        else:
+            state = 'unknown' if pct is None else 'ok'
+        result[name] = {'remaining_percent': pct, 'reset_at': reset, 'state': state}
+    return result
 
 
 def get_post(post_id, task=False):
@@ -262,6 +296,9 @@ def create_app(database=None):
     def me():
         row = dict(g.agent)
         row.pop('key_hash')
+        row['quota'] = quota_summary(row, int(time.time()))
+        for column, _ in QUOTA_COLUMNS:
+            row.pop(column)
         row['skills'] = json.loads(row['skills'])
         row['docs'] = DOCS
         return jsonify(row)
@@ -270,11 +307,15 @@ def create_app(database=None):
     def agents():
         now = int(time.time())
         rows = g.db.execute('SELECT a.id,a.skills,a.capacity,a.accepting,a.last_seen,a.scope,'
+                            'a.quota_5h_pct,a.quota_5h_reset,a.quota_week_pct,a.quota_week_reset,a.quota_reported_at,'
                             '(SELECT count(*) FROM posts p WHERE p.claimed_by=a.id '
                             'AND p.state=\'claimed\' AND p.lease_until>?) AS active_tasks FROM agents a', (now,))
         result = []
         for row in rows:
             item = dict(row)
+            item['quota'] = quota_summary(row, now)
+            for column in ('quota_5h_pct', 'quota_5h_reset', 'quota_week_pct', 'quota_week_reset', 'quota_reported_at'):
+                del item[column]
             item['skills'] = json.loads(item['skills'])
             item['online'] = item['last_seen'] > now - 300
             result.append(item)
@@ -296,6 +337,39 @@ def create_app(database=None):
         g.db.execute('UPDATE agents SET skills=?,capacity=?,accepting=?,last_seen=? WHERE id=?',
                      (json.dumps(sorted(set(skills))), capacity, accepting, int(time.time()), g.agent['id']))
         return {'ok': True, 'lease_seconds': LEASE_SECONDS}, 200
+
+    @app.get(API + '/me/quota')
+    def get_quota():
+        row = g.db.execute('SELECT * FROM agents WHERE id=?', (g.agent['id'],)).fetchone()
+        return jsonify(quota_summary(row, int(time.time())))
+
+    @app.post(API + '/me/quota')
+    @write
+    def report_quota():
+        # Partial update: only windows present are changed; inside a window only the fields present are changed
+        # (null = unknown). The key owner can only report for itself; reported_at is set by the server.
+        data = body()
+        unknown = set(data) - set(QUOTA_WINDOWS)
+        if unknown or not data:
+            fail(400, 'invalid_field', 'Send at least one of: ' + ', '.join(QUOTA_WINDOWS))
+        row = g.db.execute('SELECT * FROM agents WHERE id=?', (g.agent['id'],)).fetchone()
+        values = {}
+        for name, prefix in QUOTA_WINDOWS.items():
+            if name not in data:
+                continue
+            window = data[name]
+            if not isinstance(window, dict) or not window or set(window) - {'remaining_percent', 'reset_at'}:
+                fail(400, 'invalid_field', f'{name}: expected object with remaining_percent and/or reset_at')
+            if 'remaining_percent' in window:
+                values[prefix + '_pct'] = percent(window['remaining_percent'])
+            if 'reset_at' in window:
+                values[prefix + '_reset'] = reset_time(window['reset_at'])
+        now = int(time.time())
+        values['quota_reported_at'] = now
+        g.db.execute('UPDATE agents SET ' + ','.join(c + '=?' for c in values) + ',last_seen=? WHERE id=?',
+                     list(values.values()) + [now, g.agent['id']])
+        row = g.db.execute('SELECT * FROM agents WHERE id=?', (g.agent['id'],)).fetchone()
+        return quota_summary(row, now), 200
 
     def list_posts(ids_only=False):
         before = before_cursor()
