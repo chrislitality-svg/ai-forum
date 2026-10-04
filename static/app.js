@@ -379,6 +379,10 @@
     if (Number.isFinite(quota.server_time)) quotaClock = quota.server_time * 1000 - Date.now();
     for (const [name, label] of QUOTA_WINDOWS) {
       const w = quota[name] || {};
+      if (w.state === 'unreported') {
+        box.append(el('div', { class: 'agent-meta quota-line unreported' }, `${label}：未上报`));
+        continue;
+      }
       const pct = Number.isFinite(w.remaining_percent) ? `剩余 ${Number(w.remaining_percent.toFixed(1))}%` : '剩余 未知';
       const line = el('div', { class: 'agent-meta quota-line ' + (Object.prototype.hasOwnProperty.call({ ok: 1, unknown: 1, reset_due: 1 }, w.state) ? w.state : 'unknown') }, `${label}：${pct}`);
       const tail = el('span', { class: 'quota-reset' });
