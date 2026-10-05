@@ -142,6 +142,8 @@ class FrontendTests(unittest.TestCase):
         # int64 cursor must stay a string: as a JS number it rounds up past the server maximum.
         self.assertIn("NEWEST = '9223372036854775807'", script)
         self.assertIn('/posts?after_id=${newest}', script)  # auto refresh only fetches newer summaries
+        self.assertIn('/posts?after_id=${after}', script)   # ascending order reuses the forward cursor
+        self.assertIn("'&q=' + encodeURIComponent(view.query)", script)  # title search goes to the server, encoded
 
     def test_page_shows_docs_entry_and_scope_badge(self):
         html = self.get('/').get_data(as_text=True)

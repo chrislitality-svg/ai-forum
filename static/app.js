@@ -14,7 +14,14 @@
     app: $('app'), whoami: $('whoami'), scope: $('scope'), docs: $('docs'), auto: $('auto'), refresh: $('refresh'), logout: $('logout'), banner: $('banner'),
     agents: $('agents'), posts: $('posts'), listFoot: $('list-foot'), listCount: $('list-count'),
     detailPane: $('detail-pane'), detail: $('detail'), back: $('back'),
+    orderDesc: $('order-desc'), orderAsc: $('order-asc'),
+    searchForm: $('search-form'), searchInput: $('search-input'), searchClear: $('search-clear'), searchStatus: $('search-status'),
+    agentsToggle: $('agents-toggle'), agentsDrawer: $('agents-drawer'), agentsClose: $('agents-close'),
+    agentsBackdrop: $('agents-backdrop'), agentsLeds: $('agents-leds'), agentsSummary: $('agents-summary'),
+    rain: $('rain'),
   };
+  const SEARCH_DELAY = 300;   // 输入防抖：停顿 300ms 才发请求
+  const QUERY_MAX = 100;      // 与服务端 q 参数上限一致
 
   // 所有会话数据都挂在这里，退出时整体丢弃。
   let key = null;
@@ -26,13 +33,18 @@
   let quotaTimer = null;  // 单个本地倒计时定时器；每次渲染复用，退出时清除
   let quotaClock = 0;     // 服务器时间 - 本地时间（毫秒），用 server_time 校正倒计时
   let quotaTicks = [];    // 当前卡片上的倒计时节点
+  let searchTimer = null; // 搜索防抖定时器
 
   function freshView() {
     return {
       me: null,
-      posts: [],            // 已加载的摘要，按 ID 从新到旧
-      before: NEWEST,       // 继续加载更早帖子的游标（next_before_id）
-      hasMore: false,       // 是否还有更早的帖子
+      order: 'desc',        // desc：倒序 新→旧（before_id）；asc：正序 旧→新（after_id）
+      query: '',            // 已生效的标题关键词（服务端 q 参数）
+      listSeq: 0,           // 列表请求代号：排序/搜索/刷新会让旧请求的响应作废
+      posts: [],            // 已加载的摘要，按当前排序排列
+      before: NEWEST,       // 倒序下继续加载更早帖子的游标（next_before_id）
+      after: 0,             // 正序下继续加载更新帖子的游标（next_after_id）
+      hasMore: false,       // 当前方向是否还有下一页
       loadingList: false,
       listError: null,
       selected: null,       // 当前帖子 id
@@ -210,6 +222,7 @@
       ui.banner.hidden = true;
       loginMsg('', '');
       renderDetailEmpty();
+      startRain();
       loadAgents();
       loadPosts(true);
     } catch (error) {
@@ -248,10 +261,19 @@
     coolUntil = 0;
     clearInterval(autoTimer);
     autoTimer = null;
+    clearTimeout(searchTimer);
+    searchTimer = null;
     stopQuotaTimer();
+    stopRain();
+    closeAgents(false);
     ui.auto.checked = false;
-    for (const node of [ui.agents, ui.posts, ui.listFoot, ui.detail]) node.replaceChildren();
+    for (const node of [ui.agents, ui.posts, ui.listFoot, ui.detail, ui.agentsLeds]) node.replaceChildren();
     ui.listCount.textContent = '';
+    ui.agentsSummary.textContent = '—';
+    ui.searchInput.value = '';
+    ui.searchClear.hidden = true;
+    ui.searchStatus.textContent = '';
+    renderOrder('desc');
     ui.whoami.textContent = '—';
     ui.scope.hidden = true;
     ui.scope.textContent = '';
@@ -284,8 +306,17 @@
     }
   }
 
+  // 收起状态的图标栏只显示每个 agent 一个指示灯和在线数；完整信息（含额度）在抽屉里
+  function renderRail(items) {
+    const online = items.filter((a) => a.online).length;
+    ui.agentsLeds.replaceChildren(...items.slice(0, 12).map((a) => el('i', { class: 'led' + (a.online ? ' on' : '') })));
+    ui.agentsSummary.textContent = `${online}/${items.length}`;
+    ui.agentsToggle.setAttribute('aria-label', `打开 Agent 面板：${items.length} 个 agent，${online} 个在线`);
+  }
+
   function renderAgents(items) {
     quotaTicks = [];
+    renderRail(items);
     if (!items.length) { ui.agents.replaceChildren(el('p', { class: 'empty' }, '暂无 agent')); return; }
     ui.agents.replaceChildren(...items.map((a) => {
       const capacity = Math.max(1, Math.min(16, Number(a.capacity) || 1));
@@ -306,6 +337,41 @@
     }));
     startQuotaTimer();
   }
+
+  // ---------- Agent 抽屉：点击/触屏/键盘打开，Escape、关闭按钮或点遮罩关闭，焦点在抽屉内循环并在关闭后回到图标栏 ----------
+  function openAgents() {
+    if (!view || !ui.agentsDrawer.hidden) return;
+    ui.agentsDrawer.hidden = false;
+    ui.agentsBackdrop.hidden = false;
+    ui.agentsToggle.setAttribute('aria-expanded', 'true');
+    document.body.classList.add('drawer-open');
+    ui.agentsClose.focus();
+  }
+
+  function closeAgents(restoreFocus) {
+    if (ui.agentsDrawer.hidden) return;
+    ui.agentsDrawer.hidden = true;
+    ui.agentsBackdrop.hidden = true;
+    ui.agentsToggle.setAttribute('aria-expanded', 'false');
+    document.body.classList.remove('drawer-open');
+    if (restoreFocus) ui.agentsToggle.focus();
+  }
+
+  ui.agentsToggle.addEventListener('click', () => (ui.agentsDrawer.hidden ? openAgents() : closeAgents(true)));
+  ui.agentsClose.addEventListener('click', () => closeAgents(true));
+  ui.agentsBackdrop.addEventListener('click', () => closeAgents(true));
+  document.addEventListener('keydown', (event) => {
+    if (ui.agentsDrawer.hidden) return;
+    if (event.key === 'Escape') { event.preventDefault(); closeAgents(true); return; }
+    if (event.key !== 'Tab') return;
+    if (!ui.agentsDrawer.contains(document.activeElement)) { event.preventDefault(); ui.agentsClose.focus(); return; }
+    const focusable = [...ui.agentsDrawer.querySelectorAll('button, a[href], [tabindex]:not([tabindex="-1"])')].filter((n) => n.offsetParent !== null);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  });
 
   // ---------- 额度与重置倒计时 ----------
   // 倒计时只在浏览器本地每秒更新，不额外访问服务器；reset_at 到期显示“待刷新/待上报”，不会自动回填 100%。
@@ -338,9 +404,14 @@
       line.append(' · ', tail);
       if (Number.isFinite(w.reset_at)) quotaTicks.push({ node: tail, resetAt: w.reset_at });
       else tail.textContent = '重置时间未知';
+      // 每个窗口各自的上报时间与过期标记：只更新一个窗口时，另一个窗口不会被显示成“刚刚上报”
+      if (Number.isFinite(w.reported_at)) {
+        line.append(' · 上报 ', el('time', { datetime: new Date(w.reported_at * 1000).toISOString(), title: fmtTime(w.reported_at) }, ago(w.reported_at)));
+      }
+      if (w.stale) line.append(el('span', { class: 'quota-stale' }, ' · 已过期'));
       box.append(line);
     }
-    box.append(el('div', { class: 'agent-meta quota-line' }, '额度上报 ',
+    box.append(el('div', { class: 'agent-meta quota-line' }, '最早一次窗口上报 ',
       el('time', { datetime: new Date(quota.reported_at * 1000).toISOString(), title: fmtTime(quota.reported_at) }, ago(quota.reported_at)),
       quota.stale ? el('span', { class: 'quota-stale' }, ' · 数据已过期') : null));
     return box;
@@ -370,29 +441,44 @@
     quotaTicks = [];
   }
 
-  // ---------- 帖子列表（最新在前） ----------
-  // reset 读取最新一页，成功后才替换列表，失败则保留已显示的摘要；否则用 before_id 继续加载更早的帖子
+  // ---------- 帖子列表：倒序（新→旧，before_id）/ 正序（旧→新，after_id）+ 服务端标题搜索 ----------
+  // 关键词只作为 q 参数交给服务端，在所有帖子标题里匹配；不在前端过滤已加载页。
+  function queryParam() {
+    return view.query ? '&q=' + encodeURIComponent(view.query) : '';
+  }
+
+  // reset：从当前方向的第一页重新读取，旧的在途列表请求一律作废（listSeq），成功后才替换列表，失败保留已显示的摘要。
+  // 非 reset：沿当前方向的游标加载下一页；同一时刻只允许一个“加载更多”在途。
   async function loadPosts(reset) {
-    if (!view || view.loadingList) return;
+    if (!view) return;
+    if (!reset && view.loadingList) return;
     const mine = session;
+    if (reset) view.listSeq += 1;
+    const seq = view.listSeq;
+    const order = view.order;
     const before = reset ? NEWEST : view.before;
+    const after = reset ? 0 : view.after;
     view.loadingList = true;
     view.listError = null;
     renderListFoot(true);
-    if (!view.posts.length) ui.posts.replaceChildren(el('li', { class: 'loading' }, '读取帖子摘要'));
+    renderSearchStatus();
+    if (!view.posts.length) ui.posts.replaceChildren(el('li', { class: 'loading' }, view.query ? '搜索中' : '读取帖子摘要'));
     try {
-      const data = await api(`/posts?before_id=${before}&limit=${PAGE}`);
-      if (mine !== session) return;
+      const data = order === 'asc'
+        ? await api(`/posts?after_id=${after}&limit=${PAGE}${queryParam()}`)
+        : await api(`/posts?before_id=${before}&limit=${PAGE}${queryParam()}`);
+      if (mine !== session || seq !== view.listSeq) return;   // 已退出，或排序/搜索已变：丢弃迟到响应
       if (reset) view.posts = [];
       addPosts(data.items || []);
-      view.before = data.next_before_id;
+      if (order === 'asc') view.after = data.next_after_id;
+      else view.before = data.next_before_id;
       view.hasMore = !!data.has_more;
     } catch (error) {
-      if (mine !== session) return;
+      if (mine !== session || seq !== view.listSeq) return;
       view.listError = error.message;
-      handle(error, '帖子列表');
+      handle(error, view.query ? '标题搜索' : '帖子列表');
     } finally {
-      if (mine === session) {
+      if (mine === session && view && seq === view.listSeq) {
         view.loadingList = false;
         renderPosts();
       }
@@ -401,19 +487,31 @@
 
   function addPosts(items) {
     const seen = new Set(view.posts.map((p) => p.id));
-    view.posts = view.posts.concat(items.filter((p) => !seen.has(p.id))).sort((a, b) => b.id - a.id);
+    const sign = view.order === 'asc' ? 1 : -1;
+    view.posts = view.posts.concat(items.filter((p) => !seen.has(p.id))).sort((a, b) => sign * (a.id - b.id));
   }
 
-  // 自动刷新：用 after_id 只拉比已加载最新帖子更新的摘要，插到顶部；新帖超过一页就直接重读最新一页
+  // 自动刷新：用 after_id 只拉比已加载最新帖子更新的摘要（带上当前关键词）。
+  // 倒序：插到顶部，新帖超过一页就直接重读第一页；正序：只有已翻到末尾时才接着往后加载。
   async function pollNewPosts() {
     if (!view || view.loadingList) return;
+    if (view.order === 'asc') {
+      if (view.hasMore || view.listError) return;
+      const current = view;
+      const seq = view.listSeq;
+      const count = view.posts.length;
+      await loadPosts(false);
+      if (view === current && seq === view.listSeq && view.posts.length > count) banner('ok', `有 ${view.posts.length - count} 个新帖子`, 5000);
+      return;
+    }
     const mine = session;
+    const seq = view.listSeq;
     const newest = view.posts.reduce((max, p) => Math.max(max, p.id), 0);
     let reload = false;
     view.loadingList = true;
     try {
-      const data = await api(`/posts?after_id=${newest}&limit=${PAGE}`);
-      if (mine !== session) return;
+      const data = await api(`/posts?after_id=${newest}&limit=${PAGE}${queryParam()}`);
+      if (mine !== session || seq !== view.listSeq) return;
       const items = data.items || [];
       if (data.has_more) reload = true;
       else if (items.length) {
@@ -421,19 +519,86 @@
         banner('ok', `有 ${items.length} 个新帖子`, 5000);
       }
     } catch (error) {
-      if (mine !== session) return;
+      if (mine !== session || seq !== view.listSeq) return;
       handle(error, '自动刷新');
     } finally {
-      if (mine === session) { view.loadingList = false; renderPosts(); }
+      if (mine === session && view && seq === view.listSeq) { view.loadingList = false; renderPosts(); }
     }
-    if (reload && mine === session) loadPosts(true);
+    if (reload && mine === session && view && seq === view.listSeq) loadPosts(true);
   }
+
+  function renderOrder(order) {
+    ui.orderDesc.setAttribute('aria-pressed', order === 'desc' ? 'true' : 'false');
+    ui.orderAsc.setAttribute('aria-pressed', order === 'asc' ? 'true' : 'false');
+  }
+
+  function setOrder(order) {
+    if (!view || view.order === order) return;
+    view.order = order;
+    renderOrder(order);
+    view.posts = [];
+    view.hasMore = false;
+    loadPosts(true);
+  }
+
+  // 生效一个新关键词：重置分页并立即请求；同一关键词不重复请求
+  function applyQuery(raw) {
+    clearTimeout(searchTimer);
+    searchTimer = null;
+    if (!view) return;
+    const query = raw.trim().slice(0, QUERY_MAX);
+    ui.searchClear.hidden = !raw;
+    if (query === view.query) { renderSearchStatus(); return; }
+    view.query = query;
+    view.posts = [];
+    view.hasMore = false;
+    loadPosts(true);
+  }
+
+  function renderSearchStatus() {
+    if (!view) { ui.searchStatus.textContent = ''; return; }
+    const pending = ui.searchInput.value.trim().slice(0, QUERY_MAX) !== view.query;
+    let text = '';
+    if (view.query || pending) {
+      const q = `“${pending ? ui.searchInput.value.trim() : view.query}”`;
+      if (pending || view.loadingList) text = `搜索中：${q}`;
+      else if (view.listError) text = `搜索失败：${view.listError}`;
+      else if (!view.posts.length) text = `没有标题包含 ${q} 的帖子`;
+      else text = `标题包含 ${q}：已加载 ${view.posts.length} 条${view.hasMore ? '，还有更多' : '，已全部列出'}`;
+    }
+    ui.searchStatus.textContent = text;
+    ui.searchStatus.className = 'search-status small ' + (view.listError && view.query ? 'err' : 'muted');
+  }
+
+  ui.orderDesc.addEventListener('click', () => setOrder('desc'));
+  ui.orderAsc.addEventListener('click', () => setOrder('asc'));
+  ui.searchInput.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    ui.searchClear.hidden = !ui.searchInput.value;
+    renderSearchStatus();
+    searchTimer = setTimeout(() => applyQuery(ui.searchInput.value), SEARCH_DELAY);
+  });
+  ui.searchInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && ui.searchInput.value) { event.preventDefault(); clearSearch(); }
+  });
+  ui.searchForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    applyQuery(ui.searchInput.value);
+  });
+  function clearSearch() {
+    ui.searchInput.value = '';
+    applyQuery('');
+    ui.searchInput.focus();
+  }
+  ui.searchClear.addEventListener('click', clearSearch);
 
   function renderPosts() {
     if (!view.posts.length) {
       ui.posts.replaceChildren(view.listError
         ? el('li', { class: 'empty' }, `读取失败：${view.listError} `, el('button', { type: 'button', class: 'btn', onclick: () => loadPosts(true) }, '重试'))
-        : el('li', { class: 'empty' }, '论坛里还没有帖子。'));
+        : view.loadingList
+          ? el('li', { class: 'loading' }, view.query ? '搜索中' : '读取帖子摘要')
+          : el('li', { class: 'empty' }, view.query ? `没有标题包含“${view.query}”的帖子。` : '论坛里还没有帖子。'));
     } else {
       ui.posts.replaceChildren(...view.posts.map((p) => el('li', { class: 'post-item' },
         el('button', { type: 'button', 'aria-current': p.id === view.selected ? 'true' : null, onclick: () => openPost(p.id) },
@@ -445,12 +610,14 @@
     }
     ui.listCount.textContent = view.posts.length ? `已加载 ${view.posts.length} 条` : '';
     renderListFoot(view.loadingList);
+    renderSearchStatus();
   }
 
   function renderListFoot(loading) {
+    const asc = view.order === 'asc';
     if (loading && view.posts.length) ui.listFoot.replaceChildren(el('p', { class: 'loading' }, '加载中'));
-    else if (view.hasMore) ui.listFoot.replaceChildren(el('button', { type: 'button', class: 'btn wide', onclick: () => loadPosts(false) }, '加载更早的帖子'));
-    else if (view.posts.length) ui.listFoot.replaceChildren(el('p', { class: 'muted small' }, '— 已到最早的帖子 —'));
+    else if (view.hasMore) ui.listFoot.replaceChildren(el('button', { type: 'button', class: 'btn wide', onclick: () => loadPosts(false) }, asc ? '加载更新的帖子' : '加载更早的帖子'));
+    else if (view.posts.length) ui.listFoot.replaceChildren(el('p', { class: 'muted small' }, asc ? '— 已到最新的帖子 —' : '— 已到最早的帖子 —'));
     else ui.listFoot.replaceChildren();
   }
 
@@ -668,6 +835,54 @@
     ui.app.classList.remove('show-detail');
     const current = ui.posts.querySelector('[aria-current=true]');
     if (current) current.focus();
+  });
+
+  // ---------- 装饰：顶栏里很淡的代码雨 ----------
+  // 只画在顶栏背景的 canvas 上（不覆盖内容、不拦截点击），约 8 帧/秒；页面隐藏时暂停，prefers-reduced-motion 时完全不画。
+  const rain = { timer: null, drops: [], ctx: null };
+  const RAIN_CHARS = 'アイウエオカキクケコサシスセソ0123456789ABCDEF<>/{}=';
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+  function startRain() {
+    stopRain();
+    if (reducedMotion.matches || !ui.rain.getContext) return;
+    const ctx = ui.rain.getContext('2d');
+    if (!ctx) return;
+    const w = Math.max(1, ui.rain.clientWidth);
+    const h = Math.max(1, ui.rain.clientHeight);
+    ui.rain.width = w;
+    ui.rain.height = h;
+    rain.ctx = ctx;
+    rain.drops = Array.from({ length: Math.ceil(w / 14) }, () => Math.random() * -h);
+    rain.timer = setInterval(drawRain, 125);
+  }
+
+  function drawRain() {
+    if (document.hidden || !rain.ctx) return;
+    const ctx = rain.ctx;
+    const h = ui.rain.height;
+    ctx.fillStyle = 'rgba(5, 8, 6, 0.22)';
+    ctx.fillRect(0, 0, ui.rain.width, h);
+    ctx.font = '12px monospace';
+    ctx.fillStyle = '#3dff8f';
+    rain.drops.forEach((y, i) => {
+      ctx.fillText(RAIN_CHARS[Math.floor(Math.random() * RAIN_CHARS.length)], i * 14, y);
+      rain.drops[i] = y > h + Math.random() * 200 ? 0 : y + 14;
+    });
+  }
+
+  function stopRain() {
+    clearInterval(rain.timer);
+    rain.timer = null;
+    if (rain.ctx) rain.ctx.clearRect(0, 0, ui.rain.width, ui.rain.height);
+    rain.ctx = null;
+  }
+
+  if (reducedMotion.addEventListener) reducedMotion.addEventListener('change', () => { if (view) startRain(); else stopRain(); });
+  let rainResize = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(rainResize);
+    rainResize = setTimeout(() => { if (view) startRain(); }, 300);
   });
 
   // ---------- 刷新 ----------

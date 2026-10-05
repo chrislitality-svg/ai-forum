@@ -376,6 +376,40 @@ class ForumTests(unittest.TestCase):
         self.assertEqual([p['id'] for p in mine], [pid])
         self.assertEqual(self.req('GET', f'/posts?before_id={pid}&kind=task').json['items'], [])
 
+    # ---------- 标题搜索 ----------
+    def test_title_search_both_orders_multi_page(self):
+        titles = ['Alpha 部署', 'beta', 'ALPHA 回归', '中文标题', 'alpha_x', '正文无关', 'alpha 三']
+        ids = [self.post(title=t, body='alpha 中文 只在正文') for t in titles]
+        hits = [ids[0], ids[2], ids[4], ids[6]]
+        top = f'/posts?before_id={2**63 - 1}&limit=2&q=alpha'
+        first = self.req('GET', top).json
+        self.assertEqual(([p['id'] for p in first['items']], first['has_more']), ([ids[6], ids[4]], True))
+        self.assertNotIn('body', first['items'][0])
+        second = self.req('GET', f'/posts?before_id={first["next_before_id"]}&limit=2&q=alpha').json
+        self.assertEqual(([p['id'] for p in second['items']], second['has_more']), ([ids[2], ids[0]], False))
+        forward = self.req('GET', '/post-ids?after_id=0&limit=3&q=ALPHA').json
+        self.assertEqual((forward['ids'], forward['has_more']), (hits[:3], True))
+        rest = self.req('GET', f'/post-ids?after_id={forward["next_after_id"]}&limit=3&q=ALPHA').json
+        self.assertEqual((rest['ids'], rest['has_more']), (hits[3:], False))
+        # 中文子串、只匹配标题不匹配正文、首尾空白忽略、空查询等于不过滤
+        self.assertEqual(self.req('GET', '/post-ids?q=%E4%B8%AD%E6%96%87').json['ids'], [ids[3]])
+        self.assertEqual(self.req('GET', '/post-ids?q=%E5%8F%AA%E5%9C%A8').json['ids'], [])
+        self.assertEqual(self.req('GET', '/post-ids?q=%20beta%20').json['ids'], [ids[1]])
+        self.assertEqual(self.req('GET', '/post-ids?q=%20%20').json['ids'], ids)
+        self.assertEqual(self.req('GET', f'/posts?before_id={ids[2]}&q=alpha&kind=task').json['items'], [])
+
+    def test_title_search_wildcards_are_literal(self):
+        a, b, c = self.post(title='100% done'), self.post(title='1000 done'), self.post(title='a_b')
+        d = self.post(title=r'back\slash')
+        self.assertEqual(self.req('GET', '/post-ids?q=%25').json['ids'], [a])
+        self.assertEqual(self.req('GET', '/post-ids?q=_').json['ids'], [c])
+        self.assertEqual(self.req('GET', '/post-ids?q=%5C').json['ids'], [d])
+        self.assertEqual(self.req('GET', "/post-ids?q=%27%20OR%201%3D1%20--").json['ids'], [])
+        self.assertEqual(self.req('GET', '/post-ids?q=0%20d').json['ids'], [b])
+        too_long = self.req('GET', '/posts?q=' + 'x' * 101)
+        self.assertEqual((too_long.status_code, too_long.json['error']['code']), (400, 'invalid_query'))
+        self.assertEqual(self.req('GET', '/posts?q=' + 'x' * 100).status_code, 200)
+
     def test_both_cursors_or_bad_before_id_rejected(self):
         for query in ('after_id=0&before_id=5', 'before_id=5&after_id=1', 'before_id=0', 'before_id=-3',
                       'before_id=x', f'before_id={2**63}'):

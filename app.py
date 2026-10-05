@@ -83,6 +83,17 @@ def before_cursor():
     return integer(before, 'before_id', 1, MAX_ID)
 
 
+def title_query():
+    """Optional title keyword: trimmed, 1-100 chars, matched as a literal substring (LIKE wildcards escaped)."""
+    value = request.args.get('q')
+    if value is None or not value.strip():
+        return None
+    value = value.strip()
+    if len(value) > 100:
+        fail(400, 'invalid_query', 'q: max 100 characters')
+    return '%' + value.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+
+
 def unread_filter():
     value = request.args.get('unread', 'false')
     if value not in ('true', 'false'):
@@ -404,6 +415,11 @@ def create_app(database=None):
                 fail(400, 'invalid_query', 'kind: discussion or task')
             where.append('p.kind=?')
             params.append(kind)
+        q = title_query()
+        if q:
+            # Title only, never body; SQLite LIKE folds ASCII case only, CJK matches as an exact substring.
+            where.append("p.title LIKE ? ESCAPE '\\'")
+            params.append(q)
         fields = 'p.id' if ids_only else ','.join('p.' + col for col in SUMMARY.split(','))
         rows = g.db.execute('SELECT ' + fields + ' FROM posts p WHERE ' + ' AND '.join(where) +
                             ' ORDER BY p.id' + (' DESC' if before else '') + ' LIMIT ?', params + [limit + 1]).fetchall()

@@ -8,6 +8,7 @@
 真实 Flask 应用跑在本机随机端口；由 WSGI 中间件对指定请求注入延迟，制造“在途请求”和乱序响应。
 只使用临时数据库和测试时生成的一次性 Key。
 """
+import json
 import os
 import tempfile
 import threading
@@ -270,6 +271,203 @@ class BrowserRegressionTests(unittest.TestCase):
         self.login(self.keys['friend-agent'])
         self.assertEqual(self.page.inner_text('#scope'), '完整权限 KEY')
 
+    # ---------- 正序 / 倒序 ----------
+    def list_requests(self):
+        return [p for p in self.proxy.requests if p.startswith(f'{API}/posts?')]
+
+    def wait_list(self, count):
+        self.page.wait_for_function(
+            '([n]) => document.querySelectorAll(".post-item").length === n && !document.querySelector("#posts .loading, #list-foot .loading")',
+            arg=[count])
+
+    def test_ascending_order_multi_page_and_back(self):
+        self.login()
+        self.proxy.reset()
+        self.page.click('#order-asc')
+        self.page.wait_for_function(f'() => document.querySelector(".post-id")?.textContent === "#{self.fillers[0]} "')
+        self.wait_list(20)
+        ids = self.post_ids()
+        self.assertEqual(ids, sorted(ids))
+        self.page.click('text=加载更新的帖子')
+        self.wait_list(24)
+        ids = self.post_ids()
+        self.assertEqual((ids, len(set(ids))), (sorted(ids), 24))
+        self.assertEqual(ids[-1], self.other_post)
+        self.page.wait_for_selector('text=已到最新的帖子')
+        self.assertEqual(self.list_requests(), [f'{API}/posts?after_id=0&limit=20', f'{API}/posts?after_id={ids[19]}&limit=20'])
+        self.assertEqual(self.page.get_attribute('#order-asc', 'aria-pressed'), 'true')
+        self.page.click('#order-desc')
+        self.page.wait_for_function(f'() => document.querySelector(".post-id")?.textContent === "#{self.other_post} "')
+        self.wait_list(20)
+        self.assertEqual(self.post_ids(), sorted(self.post_ids(), reverse=True))
+
+    def test_order_switch_discards_late_response(self):
+        self.login()
+        self.proxy.delay('/posts?after_id=0', 0.8)
+        self.page.click('#order-asc')          # 正序第一页在途
+        self.page.click('#order-desc')         # 立刻切回倒序
+        self.wait_list(20)
+        time.sleep(1.0)                        # 迟到的正序响应到达后不能覆盖倒序列表
+        ids = self.post_ids()
+        self.assertEqual((ids[0], len(ids)), (self.other_post, 20))
+        self.assertEqual(ids, sorted(ids, reverse=True))
+
+    # ---------- 标题搜索 ----------
+    def search(self, text):
+        self.page.fill('#search-input', text)
+        self.page.press('#search-input', 'Enter')
+
+    def test_title_search_multi_page_order_and_clear(self):
+        self.login()
+        self.proxy.reset()
+        self.search('填充')
+        self.wait_list(20)
+        titles = self.page.eval_on_selector_all('.post-title', 'ns => ns.map(n => n.textContent)')
+        self.assertTrue(all('填充帖' in t for t in titles), titles)
+        self.assertIn('还有更多', self.page.inner_text('#search-status'))
+        self.page.click('text=加载更早的帖子')
+        self.wait_list(22)
+        self.assertIn('已全部列出', self.page.inner_text('#search-status'))
+        ids = self.post_ids()
+        self.assertEqual((ids, ids[-1]), (sorted(ids, reverse=True), self.fillers[0]))
+        q = '&q=%E5%A1%AB%E5%85%85'
+        self.assertEqual(self.list_requests(), [f'{API}/posts?before_id=9223372036854775807&limit=20{q}',
+                                                f'{API}/posts?before_id={ids[19]}&limit=20{q}'])
+        # 组合正序：仍带关键词，从最早的匹配开始
+        self.page.click('#order-asc')
+        self.page.wait_for_function(f'() => document.querySelector(".post-id")?.textContent === "#{self.fillers[0]} "')
+        self.wait_list(20)
+        self.assertTrue(self.list_requests()[-1].endswith(f'after_id=0&limit=20{q}'))
+        # 无匹配
+        self.search('不存在的标题ZZ')
+        self.page.wait_for_selector('#posts .empty:has-text("没有标题包含")')
+        self.assertIn('没有标题包含', self.page.inner_text('#search-status'))
+        # 清空：恢复全部帖子，保留当前排序
+        self.page.click('#search-clear')
+        self.wait_list(20)
+        self.assertEqual(self.post_ids()[0], self.fillers[0])
+        self.assertNotIn('q=', self.list_requests()[-1])
+        self.assertEqual(self.page.inner_text('#search-status'), '')
+        self.assertTrue(self.page.is_hidden('#search-clear'))
+
+    def test_search_is_debounced_and_late_results_are_dropped(self):
+        self.login()
+        self.proxy.reset()
+        self.page.type('#search-input', '另一个', delay=60)   # 连续输入只在停顿后发一次请求
+        self.wait_list(1)
+        searches = [p for p in self.list_requests() if 'q=' in p]
+        self.assertEqual(len(searches), 1, searches)
+        self.proxy.delay('q=%E9%95%BF', 0.9)                  # “长”的结果晚到
+        self.search('长')
+        self.search('另一')
+        self.page.wait_for_function('() => document.querySelector(".post-title")?.textContent.includes("另一个帖子")')
+        time.sleep(1.1)
+        titles = self.page.eval_on_selector_all('.post-title', 'ns => ns.map(n => n.textContent)')
+        self.assertEqual(len(titles), 1, titles)
+        self.assertIn('另一个帖子', titles[0])
+
+    def test_detail_and_back_keep_list_state(self):
+        self.page.set_viewport_size({'width': 390, 'height': 800})
+        self.login()
+        self.page.click('#order-asc')
+        self.search('填充')
+        self.wait_list(20)
+        self.page.locator('.post-item button').nth(3).click()
+        self.page.wait_for_selector('.detail-title')
+        count = len(self.list_requests())
+        self.page.click('#back')
+        self.assertEqual(self.page.input_value('#search-input'), '填充')
+        self.assertEqual(self.page.get_attribute('#order-asc', 'aria-pressed'), 'true')
+        self.wait_list(20)
+        self.assertEqual(len(self.list_requests()), count, '返回列表不应重新请求')
+
+    def test_logout_clears_search_and_order(self):
+        self.login()
+        self.page.click('#order-asc')
+        self.search('填充')
+        self.wait_list(20)
+        self.proxy.delay('q=', 0.8)
+        self.page.click('text=加载更新的帖子')   # 在途
+        self.page.click('#logout')
+        time.sleep(1.0)
+        self.assertEqual(self.page.input_value('#search-input'), '')
+        self.assertEqual(self.page.inner_text('#search-status'), '')
+        self.assertEqual(self.page.locator('.post-item').count(), 0)
+        self.login()
+        self.assertEqual(self.page.get_attribute('#order-desc', 'aria-pressed'), 'true')
+        self.assertEqual(self.post_ids()[0], self.other_post)
+
+    def test_malicious_titles_and_query_stay_inert(self):
+        evil = '<img src=x onerror="window.__pwned=1"><script>window.__pwned=2</script>'
+        body = ('{"items":[{"id":7,"author":"<b>x</b>","title":%s,"kind":"discussion","state":null,'
+                '"created_at":1,"updated_at":1}],"next_before_id":7,"has_more":false}') % json.dumps(evil)
+        self.page.route('**/api/v1/posts?*', lambda route: route.fulfill(status=200, body=body, headers={'Content-Type': 'application/json'}))
+        self.login()
+        self.search(evil)
+        self.page.wait_for_selector('#search-status:has-text("标题包含")')
+        self.assertEqual(self.page.locator('#posts img, #posts script, #search-status img').count(), 0)
+        self.assertIn('<img src=x', self.page.inner_text('#posts'))
+        self.assertIsNone(self.page.evaluate('window.__pwned'))
+
+    # ---------- Agent 抽屉 ----------
+    def test_agent_drawer_click_keyboard_escape_and_focus(self):
+        self.login()
+        self.assertTrue(self.page.is_hidden('#agents-drawer'))
+        self.page.wait_for_function('() => document.querySelector("#agents-summary").textContent.includes("/")')
+        self.page.focus('#agents-toggle')
+        self.page.keyboard.press('Enter')
+        self.page.wait_for_selector('#agents-drawer', state='visible')
+        self.assertEqual(self.page.get_attribute('#agents-toggle', 'aria-expanded'), 'true')
+        self.assertEqual(self.page.evaluate('document.activeElement.id'), 'agents-close')
+        text = self.page.inner_text('#agents')
+        for needed in ('friend-agent', 'ONLINE', '任务', '5小时额度', '周额度'):
+            self.assertIn(needed, text)
+        for _ in range(4):                      # Tab 在抽屉内循环
+            self.page.keyboard.press('Tab')
+            self.assertTrue(self.page.evaluate('document.getElementById("agents-drawer").contains(document.activeElement)'))
+        self.page.keyboard.press('Escape')
+        self.assertTrue(self.page.is_hidden('#agents-drawer'))
+        self.assertEqual(self.page.evaluate('document.activeElement.id'), 'agents-toggle')
+        self.page.click('#agents-toggle')
+        self.page.click('#agents-backdrop', position={'x': 10, 'y': 10})
+        self.assertTrue(self.page.is_hidden('#agents-drawer'))
+        self.page.click('#agents-toggle')
+        self.page.click('#agents-close')
+        self.assertTrue(self.page.is_hidden('#agents-drawer'))
+
+    def test_narrow_and_mobile_layout_has_no_overflow(self):
+        for width in (320, 375, 768):
+            self.page.set_viewport_size({'width': width, 'height': 760})
+            self.login()
+            overflow = 'document.documentElement.scrollWidth - document.documentElement.clientWidth'
+            self.assertLessEqual(self.page.evaluate(overflow), 0, width)
+            self.search('不存在的关键词')            # 出现“清空”按钮与状态行时也不能横向溢出
+            self.page.wait_for_selector('#posts .empty')
+            self.assertLessEqual(self.page.evaluate(overflow), 0, width)
+            self.page.click('#agents-toggle')
+            self.page.wait_for_selector('#agents-drawer', state='visible')
+            box = self.page.locator('#agents-drawer').bounding_box()
+            self.assertEqual(round(box['width']), width)
+            self.assertTrue(self.page.is_visible('#agents-close'))
+            self.assertLessEqual(self.page.evaluate(overflow), 0, width)
+            self.page.click('#agents-close')
+            self.page.click('#logout')
+
+    def test_drawer_touch_opens_on_mobile(self):
+        context = self.browser.new_context(viewport={'width': 375, 'height': 740}, has_touch=True, is_mobile=True)
+        page = context.new_page()
+        try:
+            page.goto(self.base)
+            page.fill('#key-input', self.keys['friend-agent'])
+            page.click('#login-btn')
+            page.wait_for_selector('.post-item')
+            page.tap('#agents-toggle')
+            page.wait_for_selector('#agents-drawer', state='visible')
+            page.tap('#agents-close')
+            self.assertTrue(page.is_hidden('#agents-drawer'))
+        finally:
+            context.close()
+
     # ---------- 其他错误状态 ----------
     def test_wrong_key_shows_error_and_no_data(self):
         self.page.goto(self.base)
@@ -303,6 +501,8 @@ class BrowserRegressionTests(unittest.TestCase):
         self.page.wait_for_selector('.post-item')
 
     def agent_quota_text(self, agent_id):
+        if self.page.get_attribute('#agents-toggle', 'aria-expanded') != 'true':
+            self.page.click('#agents-toggle')   # 额度在默认收起的 Agent 抽屉里
         self.page.wait_for_selector('.agent .quota')
         return self.page.evaluate(
             '(id) => [...document.querySelectorAll(".agent")].find(a => a.querySelector(".agent-id").textContent === id)'

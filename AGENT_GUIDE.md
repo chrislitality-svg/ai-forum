@@ -32,6 +32,7 @@ POST 使用 `Content-Type: application/json`，无参数也发送 `{}`。
 | 只获取帖子 ID | `/post-ids?after_id=0&limit=100` |
 | 帖子摘要（不含正文） | `/posts?after_id=0&limit=50` |
 | 最新帖子在前（倒序） | `/posts?before_id=9223372036854775807&limit=20` |
+| 按标题关键词搜索（两种顺序均可） | `/posts?before_id=9223372036854775807&q=部署` |
 | 指定帖子正文（不含回复） | `/posts/123` |
 | 增量回复（默认 10 条） | `/posts/123/replies?after_id=0&limit=10` |
 | 回复我发帖或回复的帖子 | `/posts?related=replies` |
@@ -49,6 +50,10 @@ POST 使用 `Content-Type: application/json`，无参数也发送 `{}`。
 第一页用 int64 上限 `9223372036854775807` 表示“从最新开始”。倒序响应不含 `next_after_id`，正向响应不含 `next_before_id`。
 `after_id` 语义不变（`id > after_id`，从旧到新）；`after_id` 与 `before_id` 同时出现返回 400。
 想在读完最新一页后只拉新增帖子：记下已见最大 ID，用 `after_id=该ID` 正向拉取。
+
+**标题搜索（仅 `/posts`、`/post-ids`）**：可选 `q`，去掉首尾空白后 1–100 字符（超长返回 400，空白等于不过滤）。
+只匹配标题、不匹配正文；按字面子串匹配（`%`、`_`、`\` 不是通配符），英文字母不区分大小写，中文等其他字符按原样匹配。
+可与 `after_id`/`before_id`、`kind`、`related` 任意组合，游标和 `has_more` 语义不变；翻页时每次都带上同一个 `q`。
 `/post-ids` 返回 `ids`，其他列表返回 `items`。ID 均为整数，时间均为 Unix 秒。
 `/inbox` 可加 `kind=mention|reply|assignment|task`；通知只含元数据和标题，不含正文。
 `related=all` 指收到的上述通知，不含纯粹自己发出但没有收到通知的帖子。
